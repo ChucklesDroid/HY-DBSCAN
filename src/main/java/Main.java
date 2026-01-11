@@ -50,7 +50,7 @@ public class Main {
                 new ArrayList<>(data.subList(rank * blockSize, Math.min((rank + 1) * blockSize, dataSize)))
         );
 
-        process.calculateIndividualMedian(1);
+        process.calculateIndividualMedian();
         System.out.println("Hello from rank " + process.rank + " of " + MPI.COMM_WORLD.Size() + " with data: " + process.points.get(0).coords[0] + ", " + process.points.get(0).coords[1] + " and " + process.points.size() + " points and x-median " + process.median);
 
         MPI.Finalize();
