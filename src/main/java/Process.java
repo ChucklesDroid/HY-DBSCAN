@@ -75,7 +75,6 @@ public class Process {
 
         Arrays.sort(allMedians); // sorting to easily find median and also easily find send/recieve partners that have little data to send
 
-        // TODO
     }
 
     // TODO: Get Median, send Median and partner to all processes, define new groups and send message to update.
