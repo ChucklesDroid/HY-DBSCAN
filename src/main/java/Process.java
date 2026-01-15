@@ -68,7 +68,7 @@ public class Process {
                     0, // offset
                     1, // number of received message items
                     MPI.DOUBLE, // data type
-                    i, // from process with specified rank
+                    i+1, // from process with specified rank
                     INDIVIDUAL_MEDIAN // tag
             );
         }
@@ -142,7 +142,7 @@ public class Process {
             System.out.println("Something went wrong and the process didn't find itself in the sorted process list!");
         }
 
-        int cutoff= 0;
+        int cutoff = 0;
 
         for (Point point : points) {
             if (point.coords[currentDimension] > median) {
