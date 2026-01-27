@@ -10,8 +10,6 @@ public class Histogram {
     private final NavigableMap<Double, Integer> hist = new TreeMap<>();
 
     public Histogram(int dimension, ArrayList<Point> points) {
-        min = points.get(0).coords[dimension];
-        max = min;
         for (Point point : points) {
             double key = point.coords[dimension];
             int count = hist.getOrDefault(key, 0);
