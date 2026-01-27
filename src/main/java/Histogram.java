@@ -8,8 +8,6 @@ import java.util.TreeMap;
 
 public class Histogram {
     private final NavigableMap<Double, Integer> hist = new TreeMap<>();
-    private double min;
-    private double max;
 
     public Histogram(int dimension, ArrayList<Point> points) {
         min = points.get(0).coords[dimension];
@@ -19,11 +17,6 @@ public class Histogram {
             int count = hist.getOrDefault(key, 0);
             count++;
             hist.put(key, count);
-            if (key > max) {
-                max = key;
-            } else if (key < min) {
-                min = key;
-            }
         }
     }
 
@@ -110,13 +103,5 @@ public class Histogram {
             }
         }
         return bestSplit;
-    }
-
-    public double getMin() {
-        return min;
-    }
-
-    public double getMax() {
-        return max;
     }
 }
