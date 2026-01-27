@@ -9,10 +9,15 @@ public class BoundingBox {
     int globalCommGroupAddress;
 
 
-    public BoundingBox(double[][] minMaxPerDimension) {
-        this.minMaxPerDimension = minMaxPerDimension;
+    public BoundingBox(int numOfDimensions) {
+        minMaxPerDimension = new double[numOfDimensions][2];
         this.globalCommGroupAddress = MPI.COMM_WORLD.Rank();
-        this.numOfDimensions = minMaxPerDimension.length;
+        this.numOfDimensions = numOfDimensions;
+
+        for (int i = 0; i < numOfDimensions; i++) {
+            minMaxPerDimension[i][0] = Double.MIN_VALUE;
+            minMaxPerDimension[i][1] = Double.MAX_VALUE;
+        }
     }
 
     private BoundingBox(int globalCommGroupAddress, int numOfDimensions, double[][] minMaxPerDimension) {

@@ -1,6 +1,7 @@
 import mpi.Intracomm;
 import mpi.MPI;
 
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.NavigableMap;
 import java.util.TreeMap;
@@ -10,8 +11,8 @@ public class Histogram {
     private double min;
     private double max;
 
-    public Histogram(int dimension, Point[] points) {
-        min = points[0].coords[dimension];
+    public Histogram(int dimension, ArrayList<Point> points) {
+        min = points.get(0).coords[dimension];
         max = min;
         for (Point point : points) {
             double key = point.coords[dimension];
