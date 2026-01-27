@@ -52,6 +52,7 @@ public class Main {
         );
 
         process.decomposeDomain();
+        process.exchangeBoundingBoxes();
 
         System.out.println("Still alive");
 

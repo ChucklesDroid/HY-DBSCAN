@@ -5,6 +5,9 @@ import mpi.Request;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
+
+import static mpi.MPI.COMM_WORLD;
 
 public class Process {
 
@@ -12,7 +15,9 @@ public class Process {
     private final int LOCAL_HISTOGRAM = 0;
     private final int GROUP_MEDIAN = 1;
     private final int POINT_EXCHANGE = 3;
+    private final int BOUNDING_BOXES = 4;
     private BoundingBox boundingBox;
+    private List<BoundingBox> neighbours = new ArrayList<>();
 
     private double epsilon;
     private int minPts;
@@ -27,13 +32,13 @@ public class Process {
 
     public Process(ArrayList<Point> data) {
         points = data;
-        rank = MPI.COMM_WORLD.Rank();
-        numberOfProcessesInGroup = MPI.COMM_WORLD.Size();
-        group = MPI.COMM_WORLD.Group();
-        communicator = MPI.COMM_WORLD;
+        rank = COMM_WORLD.Rank();
+        numberOfProcessesInGroup = COMM_WORLD.Size();
+        group = COMM_WORLD.Group();
+        communicator = COMM_WORLD;
         currentDimension = 0;
 
-        boundingBox = new BoundingBox(points.get(0).dimensions);
+        boundingBox = new BoundingBox(points.get(0).dimensions, epsilon);
     }
 
 
@@ -139,7 +144,7 @@ public class Process {
     }
 
     public void decomposeDomain() {
-        for (int i = 0; i < Math.log(MPI.COMM_WORLD.Size()); i++) {
+        for (int i = 0; i < Math.log(COMM_WORLD.Size()); i++) {
             if (rank == 0) {
                 findAndSendGroupMedian();
             } else {
@@ -147,6 +152,23 @@ public class Process {
                 receiveGroupMedian();
             }
             exchangePoints();
+        }
+    }
+
+    public void exchangeBoundingBoxes(){
+        for (int address = 0; address < COMM_WORLD.Size(); address++) {
+            if (address == COMM_WORLD.Rank()) {
+                for (int sender = 0; sender < COMM_WORLD.Size(); sender++) {
+                    if (sender != COMM_WORLD.Rank()) {
+                        BoundingBox other = BoundingBox.receive(sender, BOUNDING_BOXES);
+                        if (boundingBox.isNeighbour(other)) {
+                            neighbours.add(other);
+                        }
+                    }
+                }
+            } else {
+                boundingBox.send(address, BOUNDING_BOXES);
+            }
         }
     }
 
