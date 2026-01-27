@@ -3,9 +3,7 @@ import mpi.Intracomm;
 import mpi.MPI;
 import mpi.Request;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.util.*;
 
 import static mpi.MPI.COMM_WORLD;
 
@@ -16,13 +14,15 @@ public class Process {
     private final int GROUP_MEDIAN = 1;
     private final int POINT_EXCHANGE = 3;
     private final int BOUNDING_BOXES = 4;
+    private final int GHOST_POINTS = 5;
     private BoundingBox boundingBox;
-    private List<BoundingBox> neighbours = new ArrayList<>();
+    private Set<BoundingBox> otherBoundingBoxes = new HashSet<>();
 
     private double epsilon;
     private int minPts;
 
-    ArrayList<Point> points;
+    private ArrayList<Point> points;
+    private ArrayList<Point> ghostPoints;
     int rank; // rank in the current group
     int numberOfProcessesInGroup; // number of processes in the current node of the kd-tree
     Group group;
@@ -38,7 +38,7 @@ public class Process {
         communicator = COMM_WORLD;
         currentDimension = 0;
 
-        boundingBox = new BoundingBox(points.get(0).dimensions, epsilon);
+        boundingBox = new BoundingBox(points.get(0).dimensions);
     }
 
 
@@ -161,13 +161,49 @@ public class Process {
                 for (int sender = 0; sender < COMM_WORLD.Size(); sender++) {
                     if (sender != COMM_WORLD.Rank()) {
                         BoundingBox other = BoundingBox.receive(sender, BOUNDING_BOXES);
-                        if (boundingBox.isNeighbour(other)) {
-                            neighbours.add(other);
-                        }
+                            otherBoundingBoxes.add(other);
                     }
                 }
             } else {
                 boundingBox.send(address, BOUNDING_BOXES);
+            }
+        }
+    }
+
+    public void exchangeGhostPoints() {
+        int k = 1;
+        Set<BoundingBox> neighbours = boundingBox.neighbourSet(otherBoundingBoxes);
+        Map<Integer, ArrayList<Point>> sendMap = new HashMap<>();
+        while (true) {
+            boolean newQueued = false;
+            for (BoundingBox neighbour : neighbours) {
+                int neighbourAddress = neighbour.globalCommGroupAddress;
+                sendMap.put(neighbourAddress, new ArrayList<>());
+                for (Point point : points) {
+                    if (neighbour.distanceToPoint(point) <= epsilon) {
+                        sendMap.get(neighbourAddress).add(point);
+                        newQueued = true;
+                    }
+                }
+            }
+            if (!newQueued) {
+                break;
+            }
+            Set<BoundingBox> newNeighbours = new HashSet<>();
+            for (BoundingBox neighbour: neighbours) {
+                newNeighbours.addAll(neighbour.neighbourSet(otherBoundingBoxes));
+            }
+            neighbours = newNeighbours;
+        }
+        for (int address = 0; address < COMM_WORLD.Size(); address++) {
+            if (address == COMM_WORLD.Rank()) {
+                for (int sender = 0; sender < COMM_WORLD.Size(); sender++) {
+                    if (sender != COMM_WORLD.Rank()) {
+                        ghostPoints.addAll(PointBuffer.receive(COMM_WORLD, sender, GHOST_POINTS).toPointList());
+                    }
+                }
+            } else {
+                new PointBuffer(sendMap.getOrDefault(address, new ArrayList<>())).send(COMM_WORLD, address, GHOST_POINTS);
             }
         }
     }

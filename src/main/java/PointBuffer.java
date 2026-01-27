@@ -1,7 +1,9 @@
 import mpi.Intracomm;
 import mpi.MPI;
+import mpi.Request;
 
 import java.util.ArrayList;
+import java.util.List;
 
 public class PointBuffer {
     private double[] data;
