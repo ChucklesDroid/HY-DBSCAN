@@ -35,6 +35,7 @@ public class Main {
 
     public static void main(String[] args) throws Exception {
         readData("src/main/resources/datasets/densired_2_truncated.csv");
+        //read time here
         MPI.Init(args);
 
         int numOfProcesses = MPI.COMM_WORLD.Size();
@@ -54,5 +55,6 @@ public class Main {
         System.out.println("Hello from rank " + process.rank + " of " + MPI.COMM_WORLD.Size() + " with data: " + process.points.get(0).coords[0] + ", " + process.points.get(0).coords[1] + " and " + process.points.size() + " points and x-median " + process.median);
 
         MPI.Finalize();
+        //read time here
     }
 }
