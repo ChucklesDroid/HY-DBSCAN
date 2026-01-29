@@ -31,13 +31,14 @@ public class Process {
     double median;
     int currentDimension;
 
-    public Process(ArrayList<Point> data) {
+    public Process(ArrayList<Point> data, double epsilon) {
         points = data;
         rank = COMM_WORLD.Rank();
         numberOfProcessesInGroup = COMM_WORLD.Size();
         group = COMM_WORLD.Group();
         communicator = COMM_WORLD;
         currentDimension = 0;
+        this.epsilon = epsilon;
 
         boundingBox = new BoundingBox(points.get(0).dimensions);
 
@@ -119,35 +120,30 @@ public class Process {
 
     public void exchangePoints() { // all processes
         log("Exchanging points");
-        int cutoff = 0;
+
+        ArrayList<Point> upperPoints = new ArrayList<>();
+        ArrayList<Point> lowerPoints = new ArrayList<>();
 
         log("Looking for points to exchange");
         for (Point point : points) {
             if (point.coords[currentDimension] > median) {
-                break;
+                upperPoints.add(point);
+            } else {
+                lowerPoints.add(point);
             }
-            cutoff++;
         }
 
         log("Sending and receiving points");
         ArrayList<Point> sendList;
         if (rank < numberOfProcessesInGroup /2) {
             log("Sending higher points");
-            try {
-                sendList = new ArrayList<>(points.subList(cutoff, points.size()));
-            } catch (IndexOutOfBoundsException e) {
-                sendList = new ArrayList<>();
-            }
-            points = new ArrayList<>(points.subList(0, cutoff));
+            sendList = upperPoints;
+            points = lowerPoints;
             boundingBox.setMax(currentDimension, median);
         }else {
             log("Sending lower points");
-            sendList = new ArrayList<>(points.subList(0, cutoff));
-            try {
-                points = new ArrayList<>(points.subList(cutoff, points.size()));
-            } catch (IndexOutOfBoundsException e) {
-                points = new ArrayList<>();
-            }
+            sendList = lowerPoints;
+            points = upperPoints;
             boundingBox.setMin(currentDimension, median);
         }
         ArrayList<Point> receivedPoints;
@@ -183,7 +179,6 @@ public class Process {
         // Preparing next round
 
         numberOfProcessesInGroup /= 2; // can now only see half of the previous processes
-        currentDimension++;
         currentDimension = (currentDimension + 1) % dimCount;
         communicator = COMM_WORLD.Create(group);
         rank = group.Rank();
@@ -208,7 +203,7 @@ public class Process {
         int depth = (int) (Math.log(COMM_WORLD.Size()) / Math.log(2));
 
         for (int i = 0; i < depth; i++) {
-            log("starting kd-Tree round " + i);
+            log("starting kd-Tree round " + i + " with dimension " + currentDimension);
             if (rank == 0) {
                 findAndSendGroupMedian();
             } else {
@@ -218,6 +213,10 @@ public class Process {
             exchangePoints();
             log("finished kd-Tree round " + i + ". New group rank is " + rank);
         }
+        log("kd-Tree done. Size: " + points.size() + ". Resetting communication parameters");
+        group = COMM_WORLD.Group();
+        communicator = COMM_WORLD;
+        rank = group.Rank();
     }
 
     public void exchangeBoundingBoxes(){
@@ -225,6 +224,7 @@ public class Process {
         for (int address = 0; address < COMM_WORLD.Size(); address++) {
             // if (address == COMM_WORLD.Rank()) {
             if (address == rank) {
+                log("Gathering bounding boxes");
                 for (int sender = 0; sender < COMM_WORLD.Size(); sender++) {
                     //                 if (sender != COMM_WORLD.Rank()) {
                     if (sender != rank) {
@@ -232,7 +232,9 @@ public class Process {
                         otherBoundingBoxes.add(other);
                     }
                 }
+                log("Received all bounding boxes");
             } else {
+                log("Sending bounding box to process " + address);
                 this.boundingBox.send(COMM_WORLD, address, BOUNDING_BOXES);
             }
         }
@@ -278,7 +280,8 @@ public class Process {
                 new PointBuffer(sendMap.getOrDefault(address, new ArrayList<>())).send(COMM_WORLD, address, GHOST_POINTS);
             }
         }
-        log("Finished exchanging ghost points");
+        log("Finished exchanging ghost points. Received: " + ghostPoints.size());
+        log("Epsilon is " + epsilon);
     }
 
     public void log(String message) {
