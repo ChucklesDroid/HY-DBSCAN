@@ -1,3 +1,4 @@
+import mpi.Intracomm;
 import mpi.MPI;
 
 import java.util.*;
@@ -39,27 +40,52 @@ public class BoundingBox {
         return true;
     }
 
+    // public Set<BoundingBox> neighbourSet(Set<BoundingBox> others) {
+    //     Set<BoundingBox> ret = new HashSet<>();
+    //     for (BoundingBox other : others) {
+    //         if (isTouching(other)) {
+    //             ret.add(other);
+    //             others.remove(other);
+    //         }
+    //     }
+    //     return ret;
+    // }
+
     public Set<BoundingBox> neighbourSet(Set<BoundingBox> others) {
         Set<BoundingBox> ret = new HashSet<>();
-        for (BoundingBox other : others) {
+        Iterator<BoundingBox> it = others.iterator();
+        while (it.hasNext()) {
+            BoundingBox other = it.next();
             if (isTouching(other)) {
                 ret.add(other);
-                others.remove(other);
+                it.remove();
             }
         }
         return ret;
     }
 
-    public void send(int dest, int tag) {
-        int[] header = {globalCommGroupAddress, numOfDimensions};
-        MPI.COMM_WORLD.Send(header, 0, 2, MPI.INT, dest, tag);
-        double[] sendBuffer = Arrays.stream(minMaxPerDimension)
-                .flatMapToDouble(Arrays::stream)
-                .toArray();
+    // public void send(int dest, int tag) {
+    //     int[] header = {globalCommGroupAddress, numOfDimensions};
+    //     MPI.COMM_WORLD.Send(header, 0, 2, MPI.INT, dest, tag);
+    //     double[] sendBuffer = Arrays.stream(minMaxPerDimension)
+    //             .flatMapToDouble(Arrays::stream)
+    //             .toArray();
+    //
+    //     MPI.COMM_WORLD.Send(
+    //             sendBuffer,
+    //             0, numOfDimensions * 2, MPI.DOUBLE, dest, tag);
+    // }
 
-        MPI.COMM_WORLD.Send(
-                sendBuffer,
-                0, numOfDimensions * 2, MPI.DOUBLE, dest, tag);
+    public void send(Intracomm comm, int dest, int tag) {
+        int[] header = {globalCommGroupAddress, numOfDimensions};
+        comm.Send(header, 0, 2, MPI.INT, dest, tag);
+
+        double[] sendBuffer = new double[numOfDimensions + 2];
+        for (int i = 0; i < numOfDimensions; i++) {
+            sendBuffer[i * 2] = minMaxPerDimension[i][0];
+            sendBuffer[i * 2 + 1] = minMaxPerDimension[i][1];
+        }
+        comm.Send(sendBuffer, 0, sendBuffer.length, MPI.DOUBLE, dest, tag);
     }
 
     public static BoundingBox receive(int source, int tag) {

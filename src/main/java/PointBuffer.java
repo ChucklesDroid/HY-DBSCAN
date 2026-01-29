@@ -11,6 +11,14 @@ public class PointBuffer {
     private int numPoints;
 
     public PointBuffer(ArrayList<Point> points) {
+        // some processes might have zero points in specific regions.
+        if (points == null || points.isEmpty()) {
+            this.dimensions = 0;
+            this.numPoints = 0;
+            this.data = new double[0];
+            return;
+        }
+
         this.dimensions = points.get(0).dimensions;
         this.numPoints = points.size();
         this.data = new double[numPoints * dimensions];

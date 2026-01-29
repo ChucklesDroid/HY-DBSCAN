@@ -20,9 +20,10 @@ public class Process {
 
     private double epsilon;
     private int minPts;
+    private int dimCount;
 
     private ArrayList<Point> points;
-    private ArrayList<Point> ghostPoints;
+    private ArrayList<Point> ghostPoints = new ArrayList<>();
     int rank; // rank in the current group
     int numberOfProcessesInGroup; // number of processes in the current node of the kd-tree
     Group group;
@@ -39,56 +40,75 @@ public class Process {
         currentDimension = 0;
 
         boundingBox = new BoundingBox(points.get(0).dimensions);
-    }
 
+        if (data != null && !data.isEmpty()) {
+            this.dimCount = data.get(0).dimensions;
+            this.boundingBox = new BoundingBox(this.dimCount);
+        } else {
+            this.dimCount = 0;
+        }
+    }
 
     public void calculateAndSendHistogram() { //for the workers
         Histogram hist = new Histogram(currentDimension, points);
-
         hist.send(0, LOCAL_HISTOGRAM, communicator);
 
     }
 
-
-
     public void findAndSendGroupMedian() { // for the master
-
         Histogram hist = new Histogram(currentDimension, points);
         for (int sender = 1; sender < numberOfProcessesInGroup; sender++) {
             hist.receiveAndMerge(sender, LOCAL_HISTOGRAM, communicator);
         }
         median = hist.determineSlidingWindowMedian(epsilon);
 
-        Request[] messageRequests = new Request[(numberOfProcessesInGroup -1)*2];
-        for (int i = 1; i <= numberOfProcessesInGroup; i++) {
-            messageRequests[2*i] = communicator.Ibsend(
-                    median, // send buffer
-                    0, // offset
-                    1, // number of items sent
-                    MPI.DOUBLE, // data type
-                    i, // receiving process rank
-                    GROUP_MEDIAN // tag
-            );
-        }
-        Request.Waitall(messageRequests);
+        // Bcast: much faster and solves for class-cast errors
+        double[] m = new double[]{median};
+        communicator.Bcast(m, 0, 1, MPI.DOUBLE, 0);
     }
 
-    public void receiveGroupMedian() { // for the workers
-        double[] medianReceiver = new double[1];
-        communicator.Recv(
-                medianReceiver,
-                0,
-                1,
-                MPI.DOUBLE,
-                0,
-                GROUP_MEDIAN
-        );
-        median = medianReceiver[0];
+    // public void findAndSendGroupMedian() { 
+    //     Histogram hist = new Histogram(currentDimension, points);
+    //     for (int sender = 1; sender < numberOfProcessesInGroup; sender++) {
+    //         hist.receiveAndMerge(sender, LOCAL_HISTOGRAM, communicator);
+    //     }
+    //     median = hist.determineSlidingWindowMedian(epsilon);
+    //
+    //     Request[] messageRequests = new Request[(numberOfProcessesInGroup -1)*2];
+    //     for (int i = 1; i <= numberOfProcessesInGroup; i++) {
+    //         messageRequests[2*i] = communicator.Ibsend(
+    //                 median, // send buffer
+    //                 0, // offset
+    //                 1, // number of items sent
+    //                 MPI.DOUBLE, // data type
+    //                 i, // receiving process rank
+    //                 GROUP_MEDIAN // tag
+    //         );
+    //     }
+    //     Request.Waitall(messageRequests);
+    // }
 
+    // public void receiveGroupMedian() { // for the workers
+    //     double[] medianReceiver = new double[1];
+    //     communicator.Recv(
+    //             medianReceiver,
+    //             0,
+    //             1,
+    //             MPI.DOUBLE,
+    //             0,
+    //             GROUP_MEDIAN
+    //     );
+    //     median = medianReceiver[0];
+    // }
+
+    public void receiveGroupMedian() {
+        double[] medianReciever = new double[1];
+
+        communicator.Bcast(medianReciever, 0, 1, MPI.DOUBLE, 0);
+        median = medianReciever[0];
     }
 
     public void exchangePoints() { // all processes
-
         int cutoff = 0;
 
         for (Point point : points) {
@@ -120,7 +140,6 @@ public class Process {
         PointBuffer sendBuffer = new PointBuffer(sendList);
 
         int[] processAddressList = new int[numberOfProcessesInGroup];
-
         for (int i = 0; i < numberOfProcessesInGroup; i++) {
             processAddressList[i] = i;
         }
@@ -139,46 +158,63 @@ public class Process {
         numberOfProcessesInGroup /= 2; // can now only see half of the previous processes
 
         currentDimension++;
-        currentDimension %= points.get(0).dimensions;
-
+        currentDimension = (currentDimension + 1) % dimCount;
     }
 
+    // public void decomposeDomain() {
+    //     for (int i = 0; i < Math.log(COMM_WORLD.Size()); i++) {
+    //         if (rank == 0) {
+    //             findAndSendGroupMedian();
+    //         } else {
+    //             calculateAndSendHistogram();
+    //             receiveGroupMedian();
+    //         }
+    //         exchangePoints();
+    //     }
+    // }
+
     public void decomposeDomain() {
-        for (int i = 0; i < Math.log(COMM_WORLD.Size()); i++) {
-            if (rank == 0) {
-                findAndSendGroupMedian();
-            } else {
-                calculateAndSendHistogram();
-                receiveGroupMedian();
-            }
-            exchangePoints();
-        }
+      int depth = (int) (Math.log(COMM_WORLD.Size()) / Math.log(2));
+
+      for (int i = 0; i < depth; i++) {
+          if (rank == 0) {
+              findAndSendGroupMedian();
+          } else {
+              calculateAndSendHistogram();
+              receiveGroupMedian();
+          }
+          exchangePoints();
+      }
     }
 
     public void exchangeBoundingBoxes(){
         for (int address = 0; address < COMM_WORLD.Size(); address++) {
-            if (address == COMM_WORLD.Rank()) {
+            // if (address == COMM_WORLD.Rank()) {
+            if (address == rank) {
                 for (int sender = 0; sender < COMM_WORLD.Size(); sender++) {
-                    if (sender != COMM_WORLD.Rank()) {
+    //                 if (sender != COMM_WORLD.Rank()) {
+                    if (sender != rank) {
                         BoundingBox other = BoundingBox.receive(sender, BOUNDING_BOXES);
-                            otherBoundingBoxes.add(other);
+                        otherBoundingBoxes.add(other);
                     }
                 }
             } else {
-                boundingBox.send(address, BOUNDING_BOXES);
+                this.boundingBox.send(COMM_WORLD, address, BOUNDING_BOXES);
             }
         }
     }
 
     public void exchangeGhostPoints() {
-        int k = 1;
+        // int k = 1;
         Set<BoundingBox> neighbours = boundingBox.neighbourSet(otherBoundingBoxes);
         Map<Integer, ArrayList<Point>> sendMap = new HashMap<>();
+
         while (true) {
             boolean newQueued = false;
             for (BoundingBox neighbour : neighbours) {
                 int neighbourAddress = neighbour.globalCommGroupAddress;
-                sendMap.put(neighbourAddress, new ArrayList<>());
+                sendMap.putIfAbsent(neighbourAddress, new ArrayList<>());
+
                 for (Point point : points) {
                     if (neighbour.distanceToPoint(point) <= epsilon) {
                         sendMap.get(neighbourAddress).add(point);
@@ -195,6 +231,7 @@ public class Process {
             }
             neighbours = newNeighbours;
         }
+
         for (int address = 0; address < COMM_WORLD.Size(); address++) {
             if (address == COMM_WORLD.Rank()) {
                 for (int sender = 0; sender < COMM_WORLD.Size(); sender++) {
