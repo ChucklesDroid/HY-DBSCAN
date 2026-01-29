@@ -56,12 +56,13 @@ public class Main {
         Process process = new Process(
                 new ArrayList<>(data.subList(rank * blockSize, Math.min((rank + 1) * blockSize, dataSize)))
         );
+        process.log("Finished reading data");
 
         process.decomposeDomain();
         process.exchangeBoundingBoxes();
         process.exchangeGhostPoints();
 
-        System.out.println("Still alive");
+        process.log("done");
 
         MPI.Finalize();
         //read time here

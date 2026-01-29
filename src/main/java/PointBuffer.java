@@ -36,15 +36,18 @@ public class PointBuffer {
 
     public void send(Intracomm comm, int dest, int tag) {
         // Send Header
+        System.out.println("Sending header to process with group address " + dest);
         int[] header = {numPoints, dimensions};
         comm.Send(header, 0, 2, MPI.INT, dest, tag);
 
         // Send Data
+        System.out.println("Sending data to process with group address " + dest);
         comm.Send(data, 0, data.length, MPI.DOUBLE, dest, tag);
     }
 
     public static PointBuffer receive(Intracomm comm, int source, int tag) {
         // Receive Header
+        System.out.println("Receiving header from process with group address " + source);
         int[] header = new int[2];
         comm.Recv(header, 0, 2, MPI.INT, source, tag);
 
@@ -52,6 +55,7 @@ public class PointBuffer {
         int dimensions = header[1];
 
         // Receive Data
+        System.out.println("Receiving data from process with group address " + source);
         double[] data = new double[numPoints * dimensions];
         comm.Recv(data, 0, data.length, MPI.DOUBLE, source, tag);
 
