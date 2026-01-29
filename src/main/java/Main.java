@@ -1,8 +1,12 @@
 import mpi.MPI;
+import mpi.MPIException; 
+import mpi.Request;
+import mpi.Comm;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -34,9 +38,11 @@ public class Main {
     }
 
     public static void main(String[] args) throws Exception {
-        readData("src/main/resources/datasets/densired_2_truncated.csv");
         //read time here
         MPI.Init(args);
+
+        // readData("src/main/resources/datasets/densired_2_truncated.csv");
+        readData("src/main/resources/datasets/densired_2_shrink.csv");
 
         int numOfProcesses = MPI.COMM_WORLD.Size();
         int rank = MPI.COMM_WORLD.Rank();

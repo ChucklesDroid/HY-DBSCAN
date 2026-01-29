@@ -25,12 +25,16 @@ public class Histogram {
         int[] header = {binNumber};
         comm.Send(header, 0, 1, MPI.INT, dest, tag);
 
+        if (binNumber == 0) {
+            return;
+        }
+
         double[] keys = new double[binNumber];
         int[] counts = new int[binNumber];
         int i = 0;
         for (Map.Entry<Double, Integer> e : hist.entrySet()) {
-            keys[0] = e.getKey();
-            counts[0] = e.getValue();
+            keys[i] = e.getKey();
+            counts[i] = e.getValue();
             i++;
         }
         comm.Send(keys, 0, binNumber, MPI.DOUBLE, dest, tag);
@@ -43,6 +47,10 @@ public class Histogram {
         comm.Recv(header, 0, 1, MPI.INT, src, tag);
         int binNumber = header[0];
 
+        if (binNumber == 0) {
+            return;
+        }
+
         double[] keys = new double[binNumber];
         int[] counts = new int[binNumber];
         comm.Recv(keys, 0, binNumber, MPI.DOUBLE, src, tag);
@@ -54,6 +62,8 @@ public class Histogram {
     }
 
     public double determineSlidingWindowMedian(double epsilon) {
+        if (hist.isEmpty())
+            return 0.0;
 
         //turn histogram into arrays for efficient sorting
         double[] keys = hist.keySet().stream()
