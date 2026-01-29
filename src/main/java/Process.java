@@ -220,7 +220,7 @@ public class Process {
     }
 
     public void exchangeBoundingBoxes(){
-        log("Exchanging bounding boxes");
+        log("Exchanging bounding boxes. My own is " + boundingBox.toString());
         for (int address = 0; address < COMM_WORLD.Size(); address++) {
             // if (address == COMM_WORLD.Rank()) {
             if (address == rank) {
