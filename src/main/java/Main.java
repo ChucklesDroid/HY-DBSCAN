@@ -12,6 +12,9 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class Main {
+
+    //to be replaced later
+    static double epsilon = 0.1;
     static private ArrayList<Point> data;
     static private int dimensions;
 
@@ -54,7 +57,8 @@ public class Main {
         }
 
         Process process = new Process(
-                new ArrayList<>(data.subList(rank * blockSize, Math.min((rank + 1) * blockSize, dataSize)))
+                new ArrayList<>(data.subList(rank * blockSize, Math.min((rank + 1) * blockSize, dataSize))),
+                epsilon
         );
         process.log("Finished reading data");
 

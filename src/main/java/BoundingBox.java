@@ -126,4 +126,17 @@ public class BoundingBox {
         return Math.sqrt(distSqr);
     }
 
+    @Override
+    public String toString() {
+        String ret = "BoundingBox(";
+        for (int dimension = 0; dimension < numOfDimensions; dimension++) {
+            ret += "[" + minMaxPerDimension[dimension][0] + "," + minMaxPerDimension[dimension][1] + "]";
+            if (dimension != numOfDimensions-1) {
+                ret += ", ";
+            }
+        }
+        ret += ")";
+        return ret;
+    }
+
 }
