@@ -95,7 +95,7 @@ public class Histogram {
             while (rightIdx < n && keys[rightIdx] <= split + epsilon)
                 rightIdx++;
 
-            while (leftIdx < n && keys[leftIdx] < split - epsilon)
+            while (leftIdx < rightIdx && keys[leftIdx] < split - epsilon)
                 leftIdx++;
 
             int leftLoad = prefix[rightIdx];

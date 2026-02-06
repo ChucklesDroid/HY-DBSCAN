@@ -12,7 +12,6 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class Main {
-
     //to be replaced later
     static double epsilon = 0.1;
     static private ArrayList<Point> data;
@@ -49,17 +48,21 @@ public class Main {
 
         int numOfProcesses = MPI.COMM_WORLD.Size();
         int rank = MPI.COMM_WORLD.Rank();
-        int blockSize;
         int dataSize = data.size();
-        blockSize = dataSize / numOfProcesses;
+        int blockSize = dataSize / numOfProcesses;
         if (dataSize % numOfProcesses != 0) {
             blockSize++; // one more if data size isn't divisible by the number of processes
         }
 
-        Process process = new Process(
-                new ArrayList<>(data.subList(rank * blockSize, Math.min((rank + 1) * blockSize, dataSize))),
-                epsilon
-        );
+        ArrayList<Point> localData = new ArrayList<>(data.subList(rank * blockSize, Math.min((rank + 1) * blockSize, dataSize)));
+
+        Process process;
+        if (rank == 0) {
+            process = new Master(localData, epsilon);
+        } else {
+            process = new Worker(localData, epsilon);
+        }
+
         process.log("Finished reading data");
 
         process.decomposeDomain();
