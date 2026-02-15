@@ -1,6 +1,7 @@
 import mpi.Group;
 import mpi.Intracomm;
 import mpi.MPI;
+
 import java.util.*;
 import static mpi.MPI.COMM_WORLD;
 
@@ -18,6 +19,9 @@ public abstract class Process {
     protected int dimCount;
     protected ArrayList<Point> points;
     protected ArrayList<Point> ghostPoints = new ArrayList<>();
+
+    protected NavigableMap<Long, GridCell> gridMap;
+    protected Map<Long, Cluster> localClusterMap = new HashMap<>();
     
     int numberOfProcessesInGroup; // number of processes in the current node of the kd-tree
     protected int rank; // rank in the current group
@@ -165,13 +169,22 @@ public abstract class Process {
             if (address == COMM_WORLD.Rank()) {
                 for (int sender = 0; sender < COMM_WORLD.Size(); sender++) {
                     if (sender != COMM_WORLD.Rank()) {
-                        ghostPoints.addAll(PointBuffer.receive(COMM_WORLD, sender, GHOST_POINTS).toPointList());
+                        ArrayList<Point> pts = PointBuffer.receive(COMM_WORLD, sender, GHOST_POINTS).toPointList();
+                        for (Point pt: pts) {
+                            pt.sourceRank = sender;
+                        }
+                        ghostPoints.addAll(pts);
                     }
                 }
             } else {
                 new PointBuffer(sendMap.getOrDefault(address, new ArrayList<>())).send(COMM_WORLD, address, GHOST_POINTS);
             }
         }
+
+        for (Point pt : ghostPoints) {
+            pt.type = pt.GHOST;
+        }
+
         log("Finished exchanging ghost points. Received: " + ghostPoints.size());
         log("Epsilon is " + epsilon);
     }
@@ -181,6 +194,244 @@ public abstract class Process {
         group = COMM_WORLD.Group();
         communicator = COMM_WORLD;
         rank = group.Rank();
+    }
+
+    public void localDBScan(int minPts) {
+        double invSideWidth = 1.0 / (epsilon / Math.sqrt(dimCount));
+
+        ArrayList<Point> allPts = new ArrayList<>(points);
+        allPts.addAll(ghostPoints);
+        this.gridMap = new TreeMap<>();
+        long[] gridPts = new long[dimCount];
+
+        // ArrayList<GridCell> neighbourCells = new ArrayList<>();
+
+        // Assigning localId to points and making the points point to itself.
+        // pArray:- acts as an intermediate union find tree before creation of actual clusters.
+        int[] pArray = new int[allPts.size()];
+        for (int i = 0; i < pArray.length; i++) {
+            pArray[i] = i;
+            allPts.get(i).localId = i;
+        }
+
+        // 1. Creating Grids and allocating the points into it. 
+        for (Point p: allPts) {
+            for(int d = 0; d < dimCount; d++) {
+                // subtracting from boundingBox min coordinate to normalize it against dataset constraints
+                gridPts[d] = (long) Math.floor((p.coords[d] - boundingBox.minMaxPerDimension[d][0]) * invSideWidth);
+            }
+            
+            long key = (long) Arrays.hashCode(gridPts);
+            if (gridMap.putIfAbsent(key, new GridCell(p, gridPts)) != null) {
+                gridMap.get(key).points.add(p);
+            }
+        }
+
+        // 2. Assigning Core Cells and Core Points.
+        for (Map.Entry<Long, GridCell> mp : gridMap.entrySet()) {
+            GridCell cell = mp.getValue();
+            if (cell.Size() > minPts) {
+                cell.isCoreCell = true;
+                for (Point pt : cell.points) {
+                    if (pt.type != pt.GHOST) {
+                        pt.type = pt.CORE;
+                    }
+                }
+                cell.updateReptToCore();
+            }
+        }
+
+        // 3. Merging core points within core cells.
+        for (GridCell cell: gridMap.values()) {
+            if (cell.isCoreCell) {
+                for (Point pt: cell.points) {
+                    rem(find(cell.reptId, pArray), find(pt.localId, pArray), pArray);
+                }
+                cell.reptId = find(cell.reptId, pArray);
+            }
+            // if (cell.isCoreCell) {
+            //     // int id1 = pArray[cell.reptId];
+            //     int id1 = find(cell.reptId, pArray);
+            //     for (int i = 0; i < cell.Size(); i++) {
+            //         Point pt2 = cell.points.get(i);
+            //         int id2 = pt2.localId;
+            //         if (id2 != id1 && pt2.type != pt2.GHOST) {
+            //             int tempId = rem(id1, id2, pArray);
+            //             if (tempId >= 0) {
+            //                 cell.reptId = tempId;
+            //             }
+            //         }
+            //     }
+            // }
+        }
+
+        // 4. Merging points with the surounding grids to form clusters.
+        for (Map.Entry<Long, GridCell> mp : gridMap.entrySet()) {
+            GridCell cell = mp.getValue();
+
+            if (cell.isCoreCell) {
+                List<Long> neighbourKeys = neighbourGridQuery(cell);
+                for (Long key: neighbourKeys) {
+                    GridCell nCell = gridMap.get(key);
+                    if (nCell != null && nCell.isCoreCell) {
+                        if (cell.Bcp(nCell, this.epsilon)) {
+                            rem(find(cell.reptId, pArray), find(nCell.reptId, pArray), pArray);
+                        }
+                    }
+                }
+
+                // for (Point x: cell.points) {
+                //     for (GridCell nCell: neighbourCells) {
+                //         boolean bcp = cell.Bcp(nCell, epsilon);
+                //         for (Point y: nCell.points) {
+                //             // Belong to same cluster, so move to the next cell
+                //             if (find(x.localId, pArray) == find(y.localId, pArray)) {
+                //                 break;
+                //             } else if (bcp){
+                //                 rem(x.localId, y.localId, pArray);
+                //             }
+                //         }
+                //     }
+                // }
+            } else {
+                for (Point x: cell.points) {
+                    if (x.type == x.GHOST) {
+                        continue;
+                    }
+
+                    ArrayList<Point> neighbourPts = eNeighbourhoodPts(x, cell);
+                    if (neighbourPts.size() > minPts) {
+                        x.type = x.CORE;
+                        
+                        for (Point y: neighbourPts) {
+                            if (y.type == y.CORE) {
+                                rem(x.localId, y.localId, pArray);
+                            } else if (y.type == y.NOISE || y.type == y.GHOST) {
+                                if (y.type == y.NOISE) {
+                                    y.type = y.BOUNDARY;
+                                }
+                                rem(x.localId, y.localId, pArray);
+                            }
+                        }
+                    } else if (x.type == x.NOISE) {
+                        for (Point y: neighbourPts) {
+                            if (y.type == y.CORE) {
+                                x.type = x.BOUNDARY;
+                                rem(x.localId, y.localId, pArray);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        //5. Form local clusters from pArray
+        for (Point pt: allPts) {
+            long rootId = (long) find(pt.localId, pArray);
+
+            //NOTE: using rootId as uid for cluster, should be replaced by globalUid after merging
+            // checks if it points to itself i.e its not part of any cluster
+            if (rootId != pt.localId) { 
+                Cluster cluster = localClusterMap.computeIfAbsent(rootId, id -> new Cluster(id));
+
+                if (pt.type == pt.CORE) {
+                    cluster.corePts.add(pt);
+                } else if (pt.type == pt.BOUNDARY) {
+                    cluster.boundaryPts.add(pt);
+                } else if (pt.type == pt.GHOST) {
+                    //TODO subject to change 
+                    cluster.remoteProcessingNeighbours.add(pt);
+                }
+            } else {
+                continue;
+            }
+        }
+    }
+
+    //returns keys(hashes) for neighbouring grid cells
+    public List<Long> neighbourGridQuery(GridCell cell) {
+        int offset = (int) Math.ceil(Math.sqrt(this.dimCount));
+        List<Long> keys = new ArrayList<>();
+
+        generateRecursiveNeighbours(cell.pos, offset, 0, new long[this.dimCount], keys);
+        return keys;
+    }
+
+    //helper
+    private void generateRecursiveNeighbours(long[] currCellPos, int offset, int currDim, long[] candidatePos, List<Long> keys) {
+        if (currDim == this.dimCount) {
+            // skips the cell itself
+            if (Arrays.equals(currCellPos, candidatePos))
+                return;
+            
+            long key = (long) Arrays.hashCode(candidatePos);
+            keys.add(key);
+            return;
+        }
+
+        for (int i = -offset; i <= offset; i++) {
+            candidatePos[currDim] = currCellPos[currDim] + i;
+            generateRecursiveNeighbours(currCellPos, offset, currDim+1, candidatePos, keys);
+        }
+    }
+
+    // returns: epsilon neighbourhood points by checking its neighbouring grid cells.
+    private ArrayList<Point> eNeighbourhoodPts(Point x, GridCell currentCell) {
+        ArrayList<Point> neighbours = new ArrayList<>();
+        List<Long> neighbourKeys = neighbourGridQuery(currentCell);
+
+        ArrayList<GridCell> potentialCells = new ArrayList<>();
+        potentialCells.add(currentCell);
+        for (Long key: neighbourKeys) {
+            GridCell nCell = gridMap.get(key);
+            if (nCell != null) {
+                potentialCells.add(nCell);
+            }
+        }
+
+        for (GridCell cell: potentialCells) {
+            for (Point y: cell.points) {
+                if (x.distanceToPoint(y) <= epsilon) {
+                    neighbours.add(y);
+                }
+            }
+        }
+        return neighbours;
+    }
+
+    // returns: representative point
+    private int find(int x, int[] p) {
+        int rep = x;
+        while (p[rep] != rep) {
+            rep = p[rep];
+        }
+        return rep;
+    }
+
+    // for merging two clusters using parray
+    private int rem(int x, int y, int[] p) {
+        int rx = x;
+        int ry = y;
+        while (p[rx] != p[ry]) {
+            if (p[rx] > p[ry]) {
+                if (rx == p[rx]) {
+                    p[rx] = p[ry];
+                    return p[rx];
+                }
+                int z = p[rx];
+                p[rx] = p[ry];
+                rx = z;
+            } else {
+                if (ry == p[ry]) {
+                    p[ry] = p[rx];
+                    return p[ry];
+                }
+                int z = p[ry];
+                p[ry] = p[rx];
+                ry = z;
+            }
+        }
+        return -1;
     }
 
     public void log(String message) {

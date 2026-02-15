@@ -68,6 +68,7 @@ public class Main {
         process.decomposeDomain();
         process.exchangeBoundingBoxes();
         process.exchangeGhostPoints();
+        process.localDBScan(3); // input minPts through command line args
 
         process.log("done");
 
