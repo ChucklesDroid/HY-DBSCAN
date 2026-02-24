@@ -1,46 +1,43 @@
 import mpi.Group;
 import mpi.Intracomm;
 import mpi.MPI;
-import mpi.Request;
 
 import java.util.*;
-
 import static mpi.MPI.COMM_WORLD;
 
-public class Process {
-
+public abstract class Process {
     // tags for message passing
-    private final int LOCAL_HISTOGRAM = 0;
-    private final int GROUP_MEDIAN = 1;
-    private final int POINT_EXCHANGE = 3;
-    private final int BOUNDING_BOXES = 4;
-    private final int GHOST_POINTS = 5;
-    private BoundingBox boundingBox;
-    private Set<BoundingBox> otherBoundingBoxes = new HashSet<>();
+    protected final int LOCAL_HISTOGRAM = 0;
+    protected final int GROUP_MEDIAN = 1;
+    protected final int POINT_EXCHANGE = 3;
+    protected final int BOUNDING_BOXES = 4;
+    protected final int GHOST_POINTS = 5;
 
-    private double epsilon;
-    private int minPts;
-    private int dimCount;
+    protected BoundingBox boundingBox;
+    protected Set<BoundingBox> otherBoundingBoxes = new HashSet<>();
+    protected double epsilon;
+    protected int dimCount;
+    protected ArrayList<Point> points;
+    protected ArrayList<Point> ghostPoints = new ArrayList<>();
 
-    private ArrayList<Point> points;
-    private ArrayList<Point> ghostPoints = new ArrayList<>();
-    int rank; // rank in the current group
+    protected NavigableMap<Long, GridCell> gridMap;
+    protected Map<Long, Cluster> localClusterMap = new HashMap<>();
+    
     int numberOfProcessesInGroup; // number of processes in the current node of the kd-tree
-    Group group;
-    Intracomm communicator;
-    double median;
-    int currentDimension;
+    protected int rank; // rank in the current group
+    protected Group group;
+    protected Intracomm communicator;
+    protected double median;
+    protected int currentDimension;
 
     public Process(ArrayList<Point> data, double epsilon) {
-        points = data;
-        rank = COMM_WORLD.Rank();
-        numberOfProcessesInGroup = COMM_WORLD.Size();
-        group = COMM_WORLD.Group();
-        communicator = COMM_WORLD;
-        currentDimension = 0;
+        this.points = data;
+        this.rank = COMM_WORLD.Rank();
+        this.numberOfProcessesInGroup = COMM_WORLD.Size();
+        this.group = COMM_WORLD.Group();
+        this.communicator = COMM_WORLD;
+        this.currentDimension = 0;
         this.epsilon = epsilon;
-
-        boundingBox = new BoundingBox(points.get(0).dimensions);
 
         if (data != null && !data.isEmpty()) {
             this.dimCount = data.get(0).dimensions;
@@ -50,75 +47,9 @@ public class Process {
         }
     }
 
-    public void calculateAndSendHistogram() { //for the workers
-        log("(Worker) Calculating histogram");
-        Histogram hist = new Histogram(currentDimension, points);
-        log("(Worker) Sending histogram");
-        hist.send(0, LOCAL_HISTOGRAM, communicator);
+    public abstract void decomposeDomain(); 
 
-    }
-
-    public void findAndSendGroupMedian() { // for the master
-        log("(Master) Calculating histogram");
-        Histogram hist = new Histogram(currentDimension, points);
-        log("(Master) Receiving histograms");
-        for (int sender = 1; sender < numberOfProcessesInGroup; sender++) {
-            hist.receiveAndMerge(sender, LOCAL_HISTOGRAM, communicator);
-        }
-        log("(Master) Calculating median");
-        median = hist.determineSlidingWindowMedian(epsilon);
-
-        // Bcast: much faster and solves for class-cast errors
-        log("(Master) Broadcasting median");
-        double[] m = new double[]{median};
-        communicator.Bcast(m, 0, 1, MPI.DOUBLE, 0);
-        log("(Master) Broadcasted median + " + median);
-    }
-
-    // public void findAndSendGroupMedian() { 
-    //     Histogram hist = new Histogram(currentDimension, points);
-    //     for (int sender = 1; sender < numberOfProcessesInGroup; sender++) {
-    //         hist.receiveAndMerge(sender, LOCAL_HISTOGRAM, communicator);
-    //     }
-    //     median = hist.determineSlidingWindowMedian(epsilon);
-    //
-    //     Request[] messageRequests = new Request[(numberOfProcessesInGroup -1)*2];
-    //     for (int i = 1; i <= numberOfProcessesInGroup; i++) {
-    //         messageRequests[2*i] = communicator.Ibsend(
-    //                 median, // send buffer
-    //                 0, // offset
-    //                 1, // number of items sent
-    //                 MPI.DOUBLE, // data type
-    //                 i, // receiving process rank
-    //                 GROUP_MEDIAN // tag
-    //         );
-    //     }
-    //     Request.Waitall(messageRequests);
-    // }
-
-    // public void receiveGroupMedian() { // for the workers
-    //     double[] medianReceiver = new double[1];
-    //     communicator.Recv(
-    //             medianReceiver,
-    //             0,
-    //             1,
-    //             MPI.DOUBLE,
-    //             0,
-    //             GROUP_MEDIAN
-    //     );
-    //     median = medianReceiver[0];
-    // }
-
-    public void receiveGroupMedian() { // for the workers
-        log("(Worker) Receiving median");
-        double[] medianReciever = new double[1];
-
-        communicator.Bcast(medianReciever, 0, 1, MPI.DOUBLE, 0);
-        median = medianReciever[0];
-        log("(Worker) Received median + " + median);
-    }
-
-    public void exchangePoints() { // all processes
+    public void exchangePoints() {
         log("Exchanging points");
 
         ArrayList<Point> upperPoints = new ArrayList<>();
@@ -156,7 +87,7 @@ public class Process {
 
         int partnerProcess = numberOfProcessesInGroup - (rank + 1); // processes on the edges exchange with each other
         if (rank < numberOfProcessesInGroup /2) { // lower process sends first, then receives. Prevents interlocking
-            log("Sending to then receiving from group partner " + partnerProcess);
+            log("Sending to and then receiving from group partner " + partnerProcess);
             sendBuffer.send(communicator, partnerProcess, POINT_EXCHANGE);
             log("Sent " + sendList.size() + " points");
             receivedPoints = PointBuffer.receive(communicator, partnerProcess, POINT_EXCHANGE).toPointList();
@@ -165,7 +96,7 @@ public class Process {
             //Preparation for next round
             group = group.Incl(Arrays.copyOfRange(processAddressList, 0, numberOfProcessesInGroup /2)); // define new communication group
         } else {
-            log("Receiving from then sending to group partner " + partnerProcess);
+            log("Receiving from and then sending to group partner " + partnerProcess);
             receivedPoints = PointBuffer.receive(communicator, partnerProcess, POINT_EXCHANGE).toPointList();
             log("Received " + receivedPoints.size() + " points");
             sendBuffer.send(communicator, partnerProcess, POINT_EXCHANGE);
@@ -186,47 +117,12 @@ public class Process {
         log("Point exchange done");
     }
 
-    // public void decomposeDomain() {
-    //     for (int i = 0; i < Math.log(COMM_WORLD.Size()); i++) {
-    //         if (rank == 0) {
-    //             findAndSendGroupMedian();
-    //         } else {
-    //             calculateAndSendHistogram();
-    //             receiveGroupMedian();
-    //         }
-    //         exchangePoints();
-    //     }
-    // }
-
-    public void decomposeDomain() {
-        log("Starting kd-tree");
-        int depth = (int) (Math.log(COMM_WORLD.Size()) / Math.log(2));
-
-        for (int i = 0; i < depth; i++) {
-            log("starting kd-Tree round " + i + " with dimension " + currentDimension);
-            if (rank == 0) {
-                findAndSendGroupMedian();
-            } else {
-                calculateAndSendHistogram();
-                receiveGroupMedian();
-            }
-            exchangePoints();
-            log("finished kd-Tree round " + i + ". New group rank is " + rank);
-        }
-        log("kd-Tree done. Size: " + points.size() + ". Resetting communication parameters");
-        group = COMM_WORLD.Group();
-        communicator = COMM_WORLD;
-        rank = group.Rank();
-    }
-
     public void exchangeBoundingBoxes(){
         log("Exchanging bounding boxes. My own is " + boundingBox.toString());
         for (int address = 0; address < COMM_WORLD.Size(); address++) {
-            // if (address == COMM_WORLD.Rank()) {
             if (address == rank) {
                 log("Gathering bounding boxes");
                 for (int sender = 0; sender < COMM_WORLD.Size(); sender++) {
-                    //                 if (sender != COMM_WORLD.Rank()) {
                     if (sender != rank) {
                         BoundingBox other = BoundingBox.receive(sender, BOUNDING_BOXES);
                         otherBoundingBoxes.add(other);
@@ -242,7 +138,7 @@ public class Process {
 
     public void exchangeGhostPoints() {
         log("Starting to exchange ghost points");
-        // int k = 1;
+
         Set<BoundingBox> neighbours = boundingBox.neighbourSet(otherBoundingBoxes);
         Map<Integer, ArrayList<Point>> sendMap = new HashMap<>();
 
@@ -273,19 +169,272 @@ public class Process {
             if (address == COMM_WORLD.Rank()) {
                 for (int sender = 0; sender < COMM_WORLD.Size(); sender++) {
                     if (sender != COMM_WORLD.Rank()) {
-                        ghostPoints.addAll(PointBuffer.receive(COMM_WORLD, sender, GHOST_POINTS).toPointList());
+                        ArrayList<Point> pts = PointBuffer.receive(COMM_WORLD, sender, GHOST_POINTS).toPointList();
+                        for (Point pt: pts) {
+                            pt.sourceRank = sender;
+                        }
+                        ghostPoints.addAll(pts);
                     }
                 }
             } else {
                 new PointBuffer(sendMap.getOrDefault(address, new ArrayList<>())).send(COMM_WORLD, address, GHOST_POINTS);
             }
         }
+
+        for (Point pt : ghostPoints) {
+            pt.type = pt.GHOST;
+        }
+
         log("Finished exchanging ghost points. Received: " + ghostPoints.size());
         log("Epsilon is " + epsilon);
+    }
+
+    public void resetCommunication() {
+        log("kd-Tree done. Size: " + points.size() + ".Resetting communication parameters");
+        group = COMM_WORLD.Group();
+        communicator = COMM_WORLD;
+        rank = group.Rank();
+    }
+
+    public void localDBScan(int minPts) {
+        double invSideWidth = 1.0 / (epsilon / Math.sqrt(dimCount));
+
+        ArrayList<Point> allPts = new ArrayList<>(points);
+        allPts.addAll(ghostPoints);
+        this.gridMap = new TreeMap<>();
+        long[] gridPts = new long[dimCount];
+
+        // ArrayList<GridCell> neighbourCells = new ArrayList<>();
+
+        // Assigning localId to points and making the points point to itself.
+        // pArray:- acts as an intermediate union find tree before creation of actual clusters.
+        int[] pArray = new int[allPts.size()];
+        for (int i = 0; i < pArray.length; i++) {
+            pArray[i] = i;
+            allPts.get(i).localId = i;
+        }
+
+        // 1. Creating Grids and allocating the points into it. 
+        for (Point p: allPts) {
+            for(int d = 0; d < dimCount; d++) {
+                // subtracting from boundingBox min coordinate to normalize it against dataset constraints
+                gridPts[d] = (long) Math.floor((p.coords[d] - boundingBox.minMaxPerDimension[d][0]) * invSideWidth);
+            }
+            
+            long key = (long) Arrays.hashCode(gridPts);
+            if (gridMap.putIfAbsent(key, new GridCell(p, gridPts)) != null) {
+                gridMap.get(key).points.add(p);
+            }
+        }
+
+        // 2. Assigning Core Cells and Core Points.
+        for (Map.Entry<Long, GridCell> mp : gridMap.entrySet()) {
+            GridCell cell = mp.getValue();
+            if (cell.Size() > minPts) {
+                cell.isCoreCell = true;
+                for (Point pt : cell.points) {
+                    if (pt.type != pt.GHOST) {
+                        pt.type = pt.CORE;
+                    }
+                }
+                cell.updateReptToCore();
+            }
+        }
+
+        // 3. Merging core points within core cells.
+        for (GridCell cell: gridMap.values()) {
+            if (cell.isCoreCell) {
+                for (Point pt: cell.points) {
+                    rem(find(cell.reptId, pArray), find(pt.localId, pArray), pArray);
+                }
+                cell.reptId = find(cell.reptId, pArray);
+            }
+            // if (cell.isCoreCell) {
+            //     // int id1 = pArray[cell.reptId];
+            //     int id1 = find(cell.reptId, pArray);
+            //     for (int i = 0; i < cell.Size(); i++) {
+            //         Point pt2 = cell.points.get(i);
+            //         int id2 = pt2.localId;
+            //         if (id2 != id1 && pt2.type != pt2.GHOST) {
+            //             int tempId = rem(id1, id2, pArray);
+            //             if (tempId >= 0) {
+            //                 cell.reptId = tempId;
+            //             }
+            //         }
+            //     }
+            // }
+        }
+
+        // 4. Merging points with the surounding grids to form clusters.
+        for (Map.Entry<Long, GridCell> mp : gridMap.entrySet()) {
+            GridCell cell = mp.getValue();
+
+            if (cell.isCoreCell) {
+                List<Long> neighbourKeys = neighbourGridQuery(cell);
+                for (Long key: neighbourKeys) {
+                    GridCell nCell = gridMap.get(key);
+                    if (nCell != null && nCell.isCoreCell) {
+                        if (cell.Bcp(nCell, this.epsilon)) {
+                            rem(find(cell.reptId, pArray), find(nCell.reptId, pArray), pArray);
+                        }
+                    }
+                }
+
+                // for (Point x: cell.points) {
+                //     for (GridCell nCell: neighbourCells) {
+                //         boolean bcp = cell.Bcp(nCell, epsilon);
+                //         for (Point y: nCell.points) {
+                //             // Belong to same cluster, so move to the next cell
+                //             if (find(x.localId, pArray) == find(y.localId, pArray)) {
+                //                 break;
+                //             } else if (bcp){
+                //                 rem(x.localId, y.localId, pArray);
+                //             }
+                //         }
+                //     }
+                // }
+            } else {
+                for (Point x: cell.points) {
+                    if (x.type == x.GHOST) {
+                        continue;
+                    }
+
+                    ArrayList<Point> neighbourPts = eNeighbourhoodPts(x, cell);
+                    if (neighbourPts.size() > minPts) {
+                        x.type = x.CORE;
+                        
+                        for (Point y: neighbourPts) {
+                            if (y.type == y.CORE) {
+                                rem(x.localId, y.localId, pArray);
+                            } else if (y.type == y.NOISE || y.type == y.GHOST) {
+                                if (y.type == y.NOISE) {
+                                    y.type = y.BOUNDARY;
+                                }
+                                rem(x.localId, y.localId, pArray);
+                            }
+                        }
+                    } else if (x.type == x.NOISE) {
+                        for (Point y: neighbourPts) {
+                            if (y.type == y.CORE) {
+                                x.type = x.BOUNDARY;
+                                rem(x.localId, y.localId, pArray);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        //5. Form local clusters from pArray
+        for (Point pt: allPts) {
+            long rootId = (long) find(pt.localId, pArray);
+
+            //NOTE: using rootId as uid for cluster, should be replaced by globalUid after merging
+            // checks if it points to itself i.e its not part of any cluster
+            if (rootId != pt.localId) { 
+                Cluster cluster = localClusterMap.computeIfAbsent(rootId, id -> new Cluster(id));
+
+                if (pt.type == pt.CORE) {
+                    cluster.corePts.add(pt);
+                } else if (pt.type == pt.BOUNDARY) {
+                    cluster.boundaryPts.add(pt);
+                } else if (pt.type == pt.GHOST) {
+                    //TODO subject to change 
+                    cluster.remoteProcessingNeighbours.add(pt);
+                }
+            } else {
+                continue;
+            }
+        }
+    }
+
+    //returns keys(hashes) for neighbouring grid cells
+    public List<Long> neighbourGridQuery(GridCell cell) {
+        int offset = (int) Math.ceil(Math.sqrt(this.dimCount));
+        List<Long> keys = new ArrayList<>();
+
+        generateRecursiveNeighbours(cell.pos, offset, 0, new long[this.dimCount], keys);
+        return keys;
+    }
+
+    //helper
+    private void generateRecursiveNeighbours(long[] currCellPos, int offset, int currDim, long[] candidatePos, List<Long> keys) {
+        if (currDim == this.dimCount) {
+            // skips the cell itself
+            if (Arrays.equals(currCellPos, candidatePos))
+                return;
+            
+            long key = (long) Arrays.hashCode(candidatePos);
+            keys.add(key);
+            return;
+        }
+
+        for (int i = -offset; i <= offset; i++) {
+            candidatePos[currDim] = currCellPos[currDim] + i;
+            generateRecursiveNeighbours(currCellPos, offset, currDim+1, candidatePos, keys);
+        }
+    }
+
+    // returns: epsilon neighbourhood points by checking its neighbouring grid cells.
+    private ArrayList<Point> eNeighbourhoodPts(Point x, GridCell currentCell) {
+        ArrayList<Point> neighbours = new ArrayList<>();
+        List<Long> neighbourKeys = neighbourGridQuery(currentCell);
+
+        ArrayList<GridCell> potentialCells = new ArrayList<>();
+        potentialCells.add(currentCell);
+        for (Long key: neighbourKeys) {
+            GridCell nCell = gridMap.get(key);
+            if (nCell != null) {
+                potentialCells.add(nCell);
+            }
+        }
+
+        for (GridCell cell: potentialCells) {
+            for (Point y: cell.points) {
+                if (x.distanceToPoint(y) <= epsilon) {
+                    neighbours.add(y);
+                }
+            }
+        }
+        return neighbours;
+    }
+
+    // returns: representative point
+    private int find(int x, int[] p) {
+        int rep = x;
+        while (p[rep] != rep) {
+            rep = p[rep];
+        }
+        return rep;
+    }
+
+    // for merging two clusters using parray
+    private int rem(int x, int y, int[] p) {
+        int rx = x;
+        int ry = y;
+        while (p[rx] != p[ry]) {
+            if (p[rx] > p[ry]) {
+                if (rx == p[rx]) {
+                    p[rx] = p[ry];
+                    return p[rx];
+                }
+                int z = p[rx];
+                p[rx] = p[ry];
+                rx = z;
+            } else {
+                if (ry == p[ry]) {
+                    p[ry] = p[rx];
+                    return p[ry];
+                }
+                int z = p[ry];
+                p[ry] = p[rx];
+                ry = z;
+            }
+        }
+        return -1;
     }
 
     public void log(String message) {
         System.out.println("Process " + COMM_WORLD.Rank() + ": " + message);
     }
-
 }
