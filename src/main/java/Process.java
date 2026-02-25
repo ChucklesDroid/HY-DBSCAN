@@ -19,6 +19,7 @@ public abstract class Process {
     protected int dimCount;
     protected ArrayList<Point> points;
     protected ArrayList<Point> ghostPoints = new ArrayList<>();
+    protected ArrayList<Point> allPts;
 
     protected NavigableMap<Long, GridCell> gridMap;
     protected Map<Long, Cluster> localClusterMap = new HashMap<>();
@@ -196,26 +197,27 @@ public abstract class Process {
         rank = group.Rank();
     }
 
+    //FIX: have clusters where ghost point is the root
     public void localDBScan(int minPts) {
         log("Starting localDBScan. Local points: " + points.size() + ", Ghost Points: " + ghostPoints.size());
 
         double invSideWidth = 1.0 / (epsilon / Math.sqrt(dimCount));
 
-        ArrayList<Point> allPts = new ArrayList<>(points);
-        allPts.addAll(ghostPoints);
+        this.allPts = new ArrayList<>(points);
+        this.allPts.addAll(ghostPoints);
         this.gridMap = new TreeMap<>();
         long[] gridPts = new long[dimCount];
 
         // Assigning localId to points and making the points point to itself.
         // pArray:- acts as an intermediate union find tree before creation of actual clusters.
-        int[] pArray = new int[allPts.size()];
+        int[] pArray = new int[this.allPts.size()];
         for (int i = 0; i < pArray.length; i++) {
             pArray[i] = i;
-            allPts.get(i).localId = i;
+            this.allPts.get(i).localId = i;
         }
 
         // 1. Creating Grids and allocating the points into it. 
-        for (Point p: allPts) {
+        for (Point p: this.allPts) {
             for(int d = 0; d < dimCount; d++) {
                 // subtracting from boundingBox min coordinate to normalize it against dataset constraints
                 gridPts[d] = (long) Math.floor((p.coords[d] - boundingBox.minMaxPerDimension[d][0]) * invSideWidth);
@@ -278,6 +280,9 @@ public abstract class Process {
                     }
                 }
             } else {
+                if (cell.isGhost()) {
+                    continue;
+                }
                 for (Point x: cell.points) {
                     if (x.type == x.GHOST) {
                         continue;
@@ -312,8 +317,14 @@ public abstract class Process {
         log("localdbscan: Core-Cell merges (BCP): " + bcpMerges + ", Non-core core discovery: " + nonCoreExpansions);
 
         //5. Form local clusters from pArray
-        for (Point pt: allPts) {
+        Set<Long> uniqueGhostRoots = new HashSet<>();
+        for (Point pt: this.allPts) {
             long rootId = (long) find(pt.localId, pArray);
+
+            Point rootPt = this.allPts.get((int) rootId);
+            if (rootPt.type == rootPt.GHOST) {
+                uniqueGhostRoots.add((long)rootId);
+            }
 
             //NOTE: using rootId as uid for cluster, should be replaced by globalUid after merging
             // checks if it points to itself i.e its not part of any cluster
@@ -330,7 +341,7 @@ public abstract class Process {
                 }
             }
         }
-        log("DBSCAN Finished. Found " + localClusterMap.size() + " local clusters.");
+        log("DBSCAN Finished. Found " + localClusterMap.size() + " local clusters. Ghost roots: " + uniqueGhostRoots.size());
     }
 
     //returns keys(hashes) for neighbouring grid cells
@@ -388,7 +399,7 @@ public abstract class Process {
         return neighbours;
     }
 
-    // returns: representative point
+    // returns: root of the union find tree
     private int find(int x, int[] p) {
         int rep = x;
         while (p[rep] != rep) {
@@ -402,7 +413,23 @@ public abstract class Process {
         int rx = x;
         int ry = y;
         while (p[rx] != p[ry]) {
-            if (p[rx] > p[ry]) {
+            Point px = allPts.get(p[rx]);
+            Point py = allPts.get(p[ry]);
+
+            //Priority logic
+            // 1. if types are different, non ghost point is prioritised.
+            // 2. if types are same, the lower id is prioritised.
+
+            boolean pyHasPriority;
+            if (px.type == px.GHOST && py.type != py.GHOST) {
+                pyHasPriority = true;
+            } else if (px.type != px.GHOST && py.type == py.GHOST) {
+                pyHasPriority = false;
+            } else {
+                pyHasPriority = (p[rx] > p[ry]);
+            }
+
+            if (pyHasPriority) {
                 if (rx == p[rx]) {
                     p[rx] = p[ry];
                     return p[rx];

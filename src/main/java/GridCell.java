@@ -21,14 +21,40 @@ public class GridCell {
         setReptId();
     }
 
+    // checks size by excluding ghost points.
     public int Size() {
-        return this.points.size();
+        int nonGhostPoints = 0;
+        for (Point pt: this.points) {
+            if(pt.type != pt.GHOST) {
+                nonGhostPoints++;
+            }
+        }
+        return nonGhostPoints;
     }
 
     public void setReptId() {
         if (this.Size() == 0) 
             return;
+        for (Point pt : this.points) {
+            if (pt.type != pt.GHOST) {
+                this.reptId = pt.localId;
+                return;
+            }
+        }
         this.reptId = this.points.get(0).localId;
+    }
+
+    // checks if it contains only ghost points
+    public boolean isGhost() {
+        int ghostCnt = 0;
+        for (Point pt: this.points) {
+            if (pt.type == pt.GHOST) {
+                ghostCnt++;
+            }
+        }
+        if (ghostCnt == this.points.size())
+            return true;
+        return false;
     }
 
     public void updateReptToCore() {
