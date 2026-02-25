@@ -13,9 +13,9 @@ public class GridCell {
         setReptId();
     }
 
-    public GridCell(Point data, long[] pos) {
+    public GridCell(Point pt, long[] pos) {
         this.points = new ArrayList<>();
-        this.points.add(data);
+        this.points.add(pt);
         this.isCoreCell = false;
         this.pos = pos;
         setReptId();
@@ -28,12 +28,7 @@ public class GridCell {
     public void setReptId() {
         if (this.Size() == 0) 
             return;
-        for (Point pt : points) {
-            if (pt.type != pt.GHOST) {
-                this.reptId = pt.localId;
-                break;
-            }
-        }
+        this.reptId = this.points.get(0).localId;
     }
 
     public void updateReptToCore() {
@@ -45,6 +40,7 @@ public class GridCell {
         }
     }
 
+    //TODO: can improve this by pruning it more using redundancy checks
     //returns true on finding Bi-Chromatic closest pair b/w 2 core cells
     public boolean Bcp(GridCell other, double epsilon) {
         for (Point x: this.points) {

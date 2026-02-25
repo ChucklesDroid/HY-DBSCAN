@@ -13,7 +13,8 @@ import java.util.stream.Stream;
 
 public class Main {
     //to be replaced later
-    static double epsilon = 0.1;
+    static double epsilon = 0.05;
+    static int minpts = 30;
     static private ArrayList<Point> data;
     static private int dimensions;
 
@@ -68,7 +69,7 @@ public class Main {
         process.decomposeDomain();
         process.exchangeBoundingBoxes();
         process.exchangeGhostPoints();
-        process.localDBScan(3); // input minPts through command line args
+        process.localDBScan(minpts); // input minPts through command line args
 
         process.log("done");
 

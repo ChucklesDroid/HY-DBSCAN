@@ -197,14 +197,14 @@ public abstract class Process {
     }
 
     public void localDBScan(int minPts) {
+        log("Starting localDBScan. Local points: " + points.size() + ", Ghost Points: " + ghostPoints.size());
+
         double invSideWidth = 1.0 / (epsilon / Math.sqrt(dimCount));
 
         ArrayList<Point> allPts = new ArrayList<>(points);
         allPts.addAll(ghostPoints);
         this.gridMap = new TreeMap<>();
         long[] gridPts = new long[dimCount];
-
-        // ArrayList<GridCell> neighbourCells = new ArrayList<>();
 
         // Assigning localId to points and making the points point to itself.
         // pArray:- acts as an intermediate union find tree before creation of actual clusters.
@@ -227,11 +227,15 @@ public abstract class Process {
             }
         }
 
+        log("localdbscan: Created " + gridMap.size() + " grid cell(s).");
+
         // 2. Assigning Core Cells and Core Points.
+        int coreCellCount = 0; // for logging
         for (Map.Entry<Long, GridCell> mp : gridMap.entrySet()) {
             GridCell cell = mp.getValue();
             if (cell.Size() > minPts) {
                 cell.isCoreCell = true;
+                coreCellCount++;
                 for (Point pt : cell.points) {
                     if (pt.type != pt.GHOST) {
                         pt.type = pt.CORE;
@@ -240,59 +244,39 @@ public abstract class Process {
                 cell.updateReptToCore();
             }
         }
+        log("localdbscan: Identified " + coreCellCount + " core cell(s).");
 
         // 3. Merging core points within core cells.
+        int coreMergeCnt = 0;
         for (GridCell cell: gridMap.values()) {
             if (cell.isCoreCell) {
+                coreMergeCnt++;
                 for (Point pt: cell.points) {
                     rem(find(cell.reptId, pArray), find(pt.localId, pArray), pArray);
                 }
                 cell.reptId = find(cell.reptId, pArray);
             }
-            // if (cell.isCoreCell) {
-            //     // int id1 = pArray[cell.reptId];
-            //     int id1 = find(cell.reptId, pArray);
-            //     for (int i = 0; i < cell.Size(); i++) {
-            //         Point pt2 = cell.points.get(i);
-            //         int id2 = pt2.localId;
-            //         if (id2 != id1 && pt2.type != pt2.GHOST) {
-            //             int tempId = rem(id1, id2, pArray);
-            //             if (tempId >= 0) {
-            //                 cell.reptId = tempId;
-            //             }
-            //         }
-            //     }
-            // }
         }
+        log("localdbscan: " + coreMergeCnt + " core cell(s) intra-merged.");
 
         // 4. Merging points with the surounding grids to form clusters.
+        int bcpMerges = 0;
+        int nonCoreExpansions = 0;
         for (Map.Entry<Long, GridCell> mp : gridMap.entrySet()) {
             GridCell cell = mp.getValue();
 
             if (cell.isCoreCell) {
                 List<Long> neighbourKeys = neighbourGridQuery(cell);
+
                 for (Long key: neighbourKeys) {
                     GridCell nCell = gridMap.get(key);
                     if (nCell != null && nCell.isCoreCell) {
                         if (cell.Bcp(nCell, this.epsilon)) {
                             rem(find(cell.reptId, pArray), find(nCell.reptId, pArray), pArray);
+                            bcpMerges++;
                         }
                     }
                 }
-
-                // for (Point x: cell.points) {
-                //     for (GridCell nCell: neighbourCells) {
-                //         boolean bcp = cell.Bcp(nCell, epsilon);
-                //         for (Point y: nCell.points) {
-                //             // Belong to same cluster, so move to the next cell
-                //             if (find(x.localId, pArray) == find(y.localId, pArray)) {
-                //                 break;
-                //             } else if (bcp){
-                //                 rem(x.localId, y.localId, pArray);
-                //             }
-                //         }
-                //     }
-                // }
             } else {
                 for (Point x: cell.points) {
                     if (x.type == x.GHOST) {
@@ -302,6 +286,7 @@ public abstract class Process {
                     ArrayList<Point> neighbourPts = eNeighbourhoodPts(x, cell);
                     if (neighbourPts.size() > minPts) {
                         x.type = x.CORE;
+                        nonCoreExpansions++;
                         
                         for (Point y: neighbourPts) {
                             if (y.type == y.CORE) {
@@ -324,6 +309,7 @@ public abstract class Process {
                 }
             }
         }
+        log("localdbscan: Core-Cell merges (BCP): " + bcpMerges + ", Non-core core discovery: " + nonCoreExpansions);
 
         //5. Form local clusters from pArray
         for (Point pt: allPts) {
@@ -342,10 +328,9 @@ public abstract class Process {
                     //TODO subject to change 
                     cluster.remoteProcessingNeighbours.add(pt);
                 }
-            } else {
-                continue;
             }
         }
+        log("DBSCAN Finished. Found " + localClusterMap.size() + " local clusters.");
     }
 
     //returns keys(hashes) for neighbouring grid cells
@@ -365,7 +350,11 @@ public abstract class Process {
                 return;
             
             long key = (long) Arrays.hashCode(candidatePos);
-            keys.add(key);
+
+            // checks if its a valid key
+            if (this.gridMap.containsKey(key)) {
+                keys.add(key);
+            }
             return;
         }
 
