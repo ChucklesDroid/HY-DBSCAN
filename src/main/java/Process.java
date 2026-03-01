@@ -316,11 +316,28 @@ public abstract class Process {
         }
         log("localdbscan: Core-Cell merges (BCP): " + bcpMerges + ", Non-core core discovery: " + nonCoreExpansions);
 
+        //4.5 Remove ghostPoints which point to itself and did not take part in cluster formation at all
+        //i.e trees having just one element.
+        //This happens because we point ever element to itself but since they
+        //dont take part in cluster formation they are never updated it.
+        for (int i = 0; i < allPts.size(); i++) {
+            Point pt = allPts.get(i);
+
+            if (pt.type == pt.GHOST) {
+                if(pArray[i] == i) {
+                    pArray[i] = -1;
+                }
+            }
+        }
+
         //5. Form local clusters from pArray
         Set<Long> uniqueGhostRoots = new HashSet<>();
         for (Point pt: this.allPts) {
             long rootId = (long) find(pt.localId, pArray);
 
+            if (rootId == -1) {
+                continue;
+            }
             Point rootPt = this.allPts.get((int) rootId);
             if (rootPt.type == rootPt.GHOST) {
                 uniqueGhostRoots.add((long)rootId);
@@ -341,7 +358,7 @@ public abstract class Process {
                 }
             }
         }
-        log("DBSCAN Finished. Found " + localClusterMap.size() + " local clusters. Ghost roots: " + uniqueGhostRoots.size());
+        log("localdbscan Finished. Found " + localClusterMap.size() + " local clusters. Ghost roots: " + uniqueGhostRoots.size());
     }
 
     //returns keys(hashes) for neighbouring grid cells
@@ -403,6 +420,9 @@ public abstract class Process {
     private int find(int x, int[] p) {
         int rep = x;
         while (p[rep] != rep) {
+            if (p[rep] == -1) {
+                return -1;
+            }
             rep = p[rep];
         }
         return rep;
