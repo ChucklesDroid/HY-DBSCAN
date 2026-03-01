@@ -197,7 +197,6 @@ public abstract class Process {
         rank = group.Rank();
     }
 
-    //FIX: have clusters where ghost point is the root
     public void localDBScan(int minPts) {
         log("Starting localDBScan. Local points: " + points.size() + ", Ghost Points: " + ghostPoints.size());
 
