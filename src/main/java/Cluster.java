@@ -23,4 +23,5 @@ public class Cluster {
         this.boundaryPts.addAll(other.boundaryPts);
         this.remoteProcessingNeighbours.addAll(other.remoteProcessingNeighbours);
     }
+
 }
