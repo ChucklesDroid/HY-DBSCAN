@@ -1,3 +1,3 @@
 #! /usr/bin/bash
 
-mpjrun.sh -np 8 -dev multicore -cp target/classes Main
+mpjrun.sh -np 1 -dev multicore -cp target/classes Main

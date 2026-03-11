@@ -3,6 +3,7 @@ public class Point {
     int dimensions;
     int type;
     int localId;
+    int globalClusterId = -1; // -1 means noise; set by assignClusterIds()
 
     // useful for ghost points, default value is -1 i.e belong to the same process
     int sourceRank;
