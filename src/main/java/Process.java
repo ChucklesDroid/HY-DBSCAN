@@ -16,6 +16,7 @@ public abstract class Process {
 
     protected BoundingBox boundingBox;
     protected Set<BoundingBox> otherBoundingBoxes = new HashSet<>();
+    protected Set<BoundingBox> otherBoundingBoxesCopy;
     protected double epsilon;
     protected int dimCount;
     protected ArrayList<Point> points;
@@ -131,7 +132,8 @@ public abstract class Process {
                         otherBoundingBoxes.add(other);
                     }
                 }
-                log("Received all bounding boxes");
+                log("Received all " + otherBoundingBoxes.size() + " bounding boxes");
+                otherBoundingBoxesCopy = new HashSet<>(otherBoundingBoxes);
             } else {
                 log("Sending bounding box to process " + address);
                 this.boundingBox.send(COMM_WORLD, address, BOUNDING_BOXES);

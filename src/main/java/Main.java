@@ -160,6 +160,10 @@ public class Main {
             ResultWriter.writePoints(allPoints);
             System.out.println("Process 0: wrote " + allPoints.size() + " points to points.csv");
 
+            // Write bounding.csv
+            int numOfBoxes = ResultWriter.writeBoundingBoxes(process.boundingBox, process.otherBoundingBoxesCopy);
+            System.out.println("Process 0: wrote " + numOfBoxes + " bounding.csv");
+
             // Write timing CSV (append)
             ResultWriter.writeTiming(
                     DATASET, numProcesses, epsilon, minpts,
