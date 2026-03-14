@@ -10,7 +10,8 @@ import java.util.stream.Stream;
 public class Main {
     static double epsilon = 0.1;
     static int minpts = 3;
-    static final String DATASET = "densired_2_truncated.csv";
+    // static final String DATASET = "densired_2_truncated.csv";
+    static final String DATASET = "test.csv";
 
     static private ArrayList<Point> data;
     static private int dimensions;

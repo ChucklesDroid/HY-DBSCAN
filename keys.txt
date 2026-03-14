@@ -1,0 +1,11 @@
+src/main/java/Process.java:25:    protected NavigableMap<Long, GridCell> gridMap;
+src/main/java/Process.java:211:        this.gridMap = new TreeMap<>();
+src/main/java/Process.java:230:            if (gridMap.putIfAbsent(key, new GridCell(p, gridPts)) != null) {
+src/main/java/Process.java:231:                gridMap.get(key).points.add(p);
+src/main/java/Process.java:235:        log("localdbscan: Created " + gridMap.size() + " grid cell(s).");
+src/main/java/Process.java:239:        for (Map.Entry<Long, GridCell> mp : gridMap.entrySet()) {
+src/main/java/Process.java:256:        for (GridCell cell: gridMap.values()) {
+src/main/java/Process.java:270:        for (Map.Entry<Long, GridCell> mp : gridMap.entrySet()) {
+src/main/java/Process.java:277:                    GridCell nCell = gridMap.get(key);
+src/main/java/Process.java:406:            if (this.gridMap.containsKey(key)) {
+src/main/java/Process.java:426:            GridCell nCell = gridMap.get(key);

@@ -22,7 +22,7 @@ public abstract class Process {
     protected ArrayList<Point> ghostPoints = new ArrayList<>();
     protected ArrayList<Point> allPts;
 
-    protected NavigableMap<Long, GridCell> gridMap;
+    protected Map<GridKey, GridCell> gridMap;
     protected Map<Long, Cluster> localClusterMap = new HashMap<>();
     protected int minPts = 0; // set when localDBScan is called; used for result writing
 
@@ -203,11 +203,12 @@ public abstract class Process {
         this.minPts = minPts;
         log("Starting localDBScan. Local points: " + points.size() + ", Ghost Points: " + ghostPoints.size());
 
-        double invSideWidth = 1.0 / (epsilon / Math.sqrt(dimCount));
+        // double invSideWidth = 1.0 / (epsilon / Math.sqrt(dimCount));
+        double invSideWidth = 1.0 / epsilon;
 
         this.allPts = new ArrayList<>(points);
         this.allPts.addAll(ghostPoints);
-        this.gridMap = new TreeMap<>();
+        this.gridMap = new HashMap<>();
         long[] gridPts = new long[dimCount];
 
         // Assigning localId to points and making the points point to itself.
@@ -222,10 +223,12 @@ public abstract class Process {
         for (Point p: this.allPts) {
             for(int d = 0; d < dimCount; d++) {
                 // subtracting from boundingBox min coordinate to normalize it against dataset constraints
-                gridPts[d] = (long) Math.floor((p.coords[d] - boundingBox.minMaxPerDimension[d][0]) * invSideWidth);
+                // gridPts[d] = (long) Math.floor((p.coords[d] - boundingBox.minMaxPerDimension[d][0]) * invSideWidth);
+                gridPts[d] = (long) Math.floor((p.coords[d]) * invSideWidth);
             }
 
-            long key = (long) Arrays.hashCode(gridPts);
+            GridKey key = new GridKey(gridPts);
+            // long key = (long) Arrays.hashCode(gridPts);
             if (gridMap.putIfAbsent(key, new GridCell(p, gridPts)) != null) {
                 gridMap.get(key).points.add(p);
             }
@@ -235,9 +238,9 @@ public abstract class Process {
 
         // 2. Assigning Core Cells and Core Points.
         int coreCellCount = 0; // for logging
-        for (Map.Entry<Long, GridCell> mp : gridMap.entrySet()) {
+        for (Map.Entry<GridKey, GridCell> mp : gridMap.entrySet()) {
             GridCell cell = mp.getValue();
-            if (cell.Size() > minPts) {
+            if (cell.Size() >= minPts) {
                 cell.isCoreCell = true;
                 coreCellCount++;
                 for (Point pt : cell.points) {
@@ -255,6 +258,7 @@ public abstract class Process {
         for (GridCell cell: gridMap.values()) {
             if (cell.isCoreCell) {
                 coreMergeCnt++;
+                log("Core cell(" + coreMergeCnt + "): " + cell.reptId);
                 for (Point pt: cell.points) {
                     rem(find(cell.reptId, pArray), find(pt.localId, pArray), pArray);
                 }
@@ -266,15 +270,17 @@ public abstract class Process {
         // 4. Merging points with the surounding grids to form clusters.
         int bcpMerges = 0;
         int nonCoreExpansions = 0;
-        for (Map.Entry<Long, GridCell> mp : gridMap.entrySet()) {
+        for (Map.Entry<GridKey, GridCell> mp : gridMap.entrySet()) {
             GridCell cell = mp.getValue();
 
             if (cell.isCoreCell) {
-                List<Long> neighbourKeys = neighbourGridQuery(cell);
+                List<GridKey> neighbourKeys = neighbourGridQuery(cell);
+                log("localdbscan: core cell under merge: " + cell.reptId);
 
-                for (Long key: neighbourKeys) {
+                for (GridKey key: neighbourKeys) {
                     GridCell nCell = gridMap.get(key);
                     if (nCell != null && nCell.isCoreCell) {
+                        log("localdbscan: neighbouring core cell under merge: " + nCell.reptId);
                         if (cell.Bcp(nCell, this.epsilon)) {
                             rem(find(cell.reptId, pArray), find(nCell.reptId, pArray), pArray);
                             bcpMerges++;
@@ -291,25 +297,23 @@ public abstract class Process {
                     }
 
                     ArrayList<Point> neighbourPts = eNeighbourhoodPts(x, cell);
-                    if (neighbourPts.size() > minPts) {
+                    if (neighbourPts.size() >= minPts) {
                         x.type = x.CORE;
                         nonCoreExpansions++;
 
                         for (Point y: neighbourPts) {
                             if (y.type == y.CORE) {
-                                rem(x.localId, y.localId, pArray);
-                            } else if (y.type == y.NOISE || y.type == y.GHOST) {
-                                if (y.type == y.NOISE) {
+                                rem(find(x.localId, pArray), find(y.localId, pArray), pArray);
+                            } else if (y.type == y.NOISE) {
                                     y.type = y.BOUNDARY;
-                                }
-                                rem(x.localId, y.localId, pArray);
+                                    pArray[y.localId] = find(x.localId, pArray);
                             }
                         }
                     } else if (x.type == x.NOISE) {
                         for (Point y: neighbourPts) {
                             if (y.type == y.CORE) {
                                 x.type = x.BOUNDARY;
-                                rem(x.localId, y.localId, pArray);
+                                rem(find(x.localId, pArray), find(y.localId, pArray), pArray);
                             }
                         }
                     }
@@ -322,62 +326,88 @@ public abstract class Process {
         //i.e trees having just one element.
         //This happens because we point every element to itself but since they
         //don't take part in cluster formation they are never updated it.
+        int ghostClusters = 0;
         for (int i = 0; i < allPts.size(); i++) {
             Point pt = allPts.get(i);
 
             if (pt.type == pt.GHOST && pArray[i] == i) {
                 pArray[i] = -1;
+                ghostClusters++;
             }
         }
+        log("localdbscan: Ghost clusters removed: " + ghostClusters);
 
         //5. Form local clusters from pArray
-        Set<Long> uniqueGhostRoots = new HashSet<>();
+        // Set<Long> uniqueGhostRoots = new HashSet<>();
+        // for (Point pt: this.allPts) {
+        //     long rootId = (long) find(pt.localId, pArray);
+        //
+        //     if (rootId == -1) {
+        //         continue;
+        //     }
+        //     Point rootPt = this.allPts.get((int) rootId);
+        //     if (rootPt.type == rootPt.GHOST) {
+        //         uniqueGhostRoots.add((long)rootId);
+        //     }
+        //
+        //     //NOTE: using rootId as uid for cluster, should be replaced by globalUid after merging
+        //     // checks if it points to itself i.e its not part of any cluster
+        //     if (rootId != pt.localId) {
+        //         Cluster cluster = localClusterMap.computeIfAbsent(rootId, id -> new Cluster(id));
+        //
+        //         if (pt.type == pt.CORE) {
+        //             cluster.corePts.add(pt);
+        //         } else if (pt.type == pt.BOUNDARY) {
+        //             cluster.boundaryPts.add(pt);
+        //         } else if (pt.type == pt.GHOST) {
+        //             //TODO subject to change
+        //             cluster.remoteProcessingNeighbours.add(pt);
+        //         }
+        //     }
+        // }
+        // log("localdbscan Finished. Found " + localClusterMap.size() + " local clusters. Ghost roots: " + uniqueGhostRoots.size());
+        
         for (Point pt: this.allPts) {
-            long rootId = (long) find(pt.localId, pArray);
-
+            int rootId = find(pt.localId, pArray);
             if (rootId == -1) {
                 continue;
             }
-            Point rootPt = this.allPts.get((int) rootId);
-            if (rootPt.type == rootPt.GHOST) {
-                uniqueGhostRoots.add((long)rootId);
-            }
-
-            //NOTE: using rootId as uid for cluster, should be replaced by globalUid after merging
-            // checks if it points to itself i.e its not part of any cluster
-            if (rootId != pt.localId) {
-                Cluster cluster = localClusterMap.computeIfAbsent(rootId, id -> new Cluster(id));
-
+            if (rootId != pt.localId || pt.type == pt.CORE) {
+                Cluster cluster = localClusterMap.computeIfAbsent((long)rootId, id -> new Cluster(id));
                 if (pt.type == pt.CORE) {
+                    // log("localdbscan: Final core points - " + pt.localId);
                     cluster.corePts.add(pt);
                 } else if (pt.type == pt.BOUNDARY) {
+                    // log("localdbscan: Final boundary points - " + pt.localId);
                     cluster.boundaryPts.add(pt);
                 } else if (pt.type == pt.GHOST) {
                     //TODO subject to change
+                    // log("localdbscan: Final ghost points - " + pt.localId);
                     cluster.remoteProcessingNeighbours.add(pt);
                 }
             }
         }
-        log("localdbscan Finished. Found " + localClusterMap.size() + " local clusters. Ghost roots: " + uniqueGhostRoots.size());
+        log("localdbscan Finished. Found " + localClusterMap.size() + " local clusters.");
     }
 
     //returns keys(hashes) for neighbouring grid cells
-    public List<Long> neighbourGridQuery(GridCell cell) {
+    public List<GridKey> neighbourGridQuery(GridCell cell) {
         int offset = (int) Math.ceil(Math.sqrt(this.dimCount));
-        List<Long> keys = new ArrayList<>();
+        List<GridKey> keys = new ArrayList<>();
 
         generateRecursiveNeighbours(cell.pos, offset, 0, new long[this.dimCount], keys);
         return keys;
     }
 
     //helper
-    private void generateRecursiveNeighbours(long[] currCellPos, int offset, int currDim, long[] candidatePos, List<Long> keys) {
+    private void generateRecursiveNeighbours(long[] currCellPos, int offset, int currDim, long[] candidatePos, List<GridKey> keys) {
         if (currDim == this.dimCount) {
             // skips the cell itself
             if (Arrays.equals(currCellPos, candidatePos))
                 return;
 
-            long key = (long) Arrays.hashCode(candidatePos);
+            // long key = (long) Arrays.hashCode(candidatePos);
+            GridKey key = new GridKey(candidatePos.clone());
 
             // checks if its a valid key
             if (this.gridMap.containsKey(key)) {
@@ -395,11 +425,11 @@ public abstract class Process {
     // returns: epsilon neighbourhood points by checking its neighbouring grid cells.
     private ArrayList<Point> eNeighbourhoodPts(Point x, GridCell currentCell) {
         ArrayList<Point> neighbours = new ArrayList<>();
-        List<Long> neighbourKeys = neighbourGridQuery(currentCell);
+        List<GridKey> neighbourKeys = neighbourGridQuery(currentCell);
 
         ArrayList<GridCell> potentialCells = new ArrayList<>();
         potentialCells.add(currentCell);
-        for (Long key: neighbourKeys) {
+        for (GridKey key: neighbourKeys) {
             GridCell nCell = gridMap.get(key);
             if (nCell != null) {
                 potentialCells.add(nCell);
