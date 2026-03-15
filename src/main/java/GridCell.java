@@ -8,7 +8,7 @@ public class GridCell {
 
     public GridCell(ArrayList<Point> data, long[] pos, boolean isCoreCell) {
         this.points = data;
-        this.pos = pos;
+        this.pos = pos.clone();
         this.isCoreCell = isCoreCell;
         setReptId();
     }
@@ -17,7 +17,7 @@ public class GridCell {
         this.points = new ArrayList<>();
         this.points.add(pt);
         this.isCoreCell = false;
-        this.pos = pos;
+        this.pos = pos.clone();
         setReptId();
     }
 
