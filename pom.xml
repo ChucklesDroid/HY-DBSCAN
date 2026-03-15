@@ -14,7 +14,7 @@
             <artifactId>mpj</artifactId>
             <version>0.44</version>
             <scope>system</scope>
-            <systemPath>${env.MPJ_HOME}/lib/mpj.jar</systemPath>
+            <systemPath>/opt/mpj/lib/mpj.jar</systemPath>
         </dependency>
     </dependencies>
 </project>

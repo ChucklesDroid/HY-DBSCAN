@@ -3,6 +3,7 @@ import java.nio.file.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Set;
 
 /**
  * Writes two output files:
@@ -20,7 +21,7 @@ public class ResultWriter {
     // Timing CSV
     // -----------------------------------------------------------------------
 
-    private static final String TIMING_FILE = "timing.csv";
+    private static final String TIMING_FILE = "results/timing.csv";
 
     private static final String TIMING_HEADER =
             "timestamp,dataset,numProcesses,epsilon,minPts," +
@@ -88,7 +89,7 @@ public class ResultWriter {
     // Points CSV
     // -----------------------------------------------------------------------
 
-    private static final String POINTS_FILE = "points.csv";
+    private static final String POINTS_FILE = "results/points_" + Main.DATASET + "_eps_" + Main.epsilon + "_minPts_" + Main.minpts + ".csv";
 
     /**
      * Writes all points with their cluster IDs to points.csv, overwriting any
@@ -130,6 +131,53 @@ public class ResultWriter {
 
         } catch (IOException e) {
             System.err.println("ResultWriter: failed to write points file: " + e.getMessage());
+        }
+    }
+
+    private static final String BOUNDING_BOX_FILE = "results/bounding_" + Main.DATASET + "_eps_" + Main.epsilon + "_minPts_" + Main.minpts + ".csv";
+
+    public static int writeBoundingBoxes(BoundingBox masterBoundingBox, Set<BoundingBox> boundingBoxes) {
+        boundingBoxes.add(masterBoundingBox);
+
+        int dims = masterBoundingBox.numOfDimensions;
+
+        try (BufferedWriter bw = new BufferedWriter(
+                new FileWriter(BOUNDING_BOX_FILE, false))) { // false = overwrite
+
+            // Header
+            StringBuilder header = new StringBuilder();
+            for (int d = 0; d < dims; d++) {
+                header.append("x").append(d).append("min").append(",");
+                header.append("x").append(d).append("max").append(",");
+            }
+            bw.write(header.toString());
+            bw.newLine();
+
+            // One row per bounding box
+            StringBuilder row = new StringBuilder();
+            for (BoundingBox b : boundingBoxes) {
+                row.setLength(0);
+                for (int d = 0; d < dims; d++) {
+                    double minX = b.minMaxPerDimension[d][0];
+                    double maxX = b.minMaxPerDimension[d][1];
+                    if (minX == Double.MIN_VALUE) {
+                        row.append("min_x").append(d).append(",");
+                    } else {
+                        row.append(minX).append(",");
+                    }
+                    if (maxX == Double.MAX_VALUE) {
+                        row.append("max_x").append(d).append(",");
+                    } else {
+                        row.append(maxX).append(",");
+                    }
+                }
+                bw.write(row.toString());
+                bw.newLine();
+            }
+            return boundingBoxes.size();
+        } catch (IOException e) {
+            System.err.println("ResultWriter: failed to write bounding file: " + e.getMessage());
+            return 0;
         }
     }
 }

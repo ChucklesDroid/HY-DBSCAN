@@ -8,9 +8,10 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class Main {
-    static double epsilon = 0.1;
-    static int minpts = 3;
-    static final String DATASET = "densired_2_truncated.csv";
+    static double epsilon;
+    static int minpts;
+    // static final String DATASET = "densired_2_truncated.csv";
+    static String DATASET;
 
     static private ArrayList<Point> data;
     static private int dimensions;
@@ -34,6 +35,15 @@ public class Main {
     }
 
     public static void main(String[] args) throws Exception {
+        if (args.length < 3) {
+            System.out.println("Usage: mpjrun.sh ... Main <epsilon> <minpts> <dataset>");
+            return;
+        }
+
+        epsilon = Double.parseDouble(args[args.length - 3]);
+        minpts  = Integer.parseInt(args[args.length - 2]);
+        DATASET = args[args.length - 1];
+
         MPI.Init(args);
 
         int numProcesses = MPI.COMM_WORLD.Size();
@@ -158,6 +168,10 @@ public class Main {
             // Write points CSV (always overwrite)
             ResultWriter.writePoints(allPoints);
             System.out.println("Process 0: wrote " + allPoints.size() + " points to points.csv");
+
+            // Write bounding.csv
+            int numOfBoxes = ResultWriter.writeBoundingBoxes(process.boundingBox, process.otherBoundingBoxesCopy);
+            System.out.println("Process 0: wrote " + numOfBoxes + " bounding.csv");
 
             // Write timing CSV (append)
             ResultWriter.writeTiming(
