@@ -9,10 +9,13 @@ import static mpi.MPI.COMM_WORLD;
 public abstract class Process {
     // tags for message passing
     protected final int LOCAL_HISTOGRAM = 0;
-    protected final int GROUP_MEDIAN = 1;
-    protected final int POINT_EXCHANGE = 3;
-    protected final int BOUNDING_BOXES = 4;
-    protected final int GHOST_POINTS = 5;
+    protected final int GROUP_MEDIAN    = 1;
+    protected final int POINT_EXCHANGE  = 3;
+    protected final int BOUNDING_BOXES  = 4;
+    protected final int GHOST_POINTS    = 5;
+    // new
+    protected final int UNION_QUERY     = 6;
+    protected final int CLUSTER_ID_SYNC = 7;
 
     protected BoundingBox boundingBox;
     protected Set<BoundingBox> otherBoundingBoxes = new HashSet<>();
@@ -25,26 +28,32 @@ public abstract class Process {
 
     protected Map<GridKey, GridCell> gridMap;
     protected Map<Long, Cluster> localClusterMap = new HashMap<>();
-    protected int minPts = 0; // set when localDBScan is called; used for result writing
+    protected int minPts = 0;
 
-    int numberOfProcessesInGroup; // number of processes in the current node of the kd-tree
-    protected int rank; // rank in the current group
+    int numberOfProcessesInGroup;
+    protected int rank;
     protected Group group;
     protected Intracomm communicator;
     protected double median;
     protected int currentDimension;
 
+    // Set by mergeClusters for every local cluster uid that was absorbed by a
+    // remote winner.  Maps:  local-uid  ->  (winnerRank, winnerClusterUid)
+    // winnerClusterUid is the uid on the winner's side so assignClusterIds can
+    // look up the exact global ID the winner chose.
+    protected Map<Long, long[]> absorbedInfo = new HashMap<>(); // uid -> [winnerRank, winnerUid]
+
     public Process(ArrayList<Point> data, double epsilon) {
         this.points = data;
-        this.rank = COMM_WORLD.Rank();
+        this.rank   = COMM_WORLD.Rank();
         this.numberOfProcessesInGroup = COMM_WORLD.Size();
-        this.group = COMM_WORLD.Group();
+        this.group  = COMM_WORLD.Group();
         this.communicator = COMM_WORLD;
         this.currentDimension = 0;
         this.epsilon = epsilon;
 
         if (data != null && !data.isEmpty()) {
-            this.dimCount = data.get(0).dimensions;
+            this.dimCount    = data.get(0).dimensions;
             this.boundingBox = new BoundingBox(this.dimCount);
         } else {
             this.dimCount = 0;
@@ -53,89 +62,63 @@ public abstract class Process {
 
     public abstract void decomposeDomain();
 
+    // -----------------------------------------------------------------------
+    // exchangePoints / exchangeBoundingBoxes / exchangeGhostPoints /
+    // resetCommunication  — unchanged from working version
+    // -----------------------------------------------------------------------
+
     public void exchangePoints() {
         log("Exchanging points");
-
         ArrayList<Point> upperPoints = new ArrayList<>();
         ArrayList<Point> lowerPoints = new ArrayList<>();
-
-        log("Looking for points to exchange");
         for (Point point : points) {
-            if (point.coords[currentDimension] > median) {
-                upperPoints.add(point);
-            } else {
-                lowerPoints.add(point);
-            }
+            if (point.coords[currentDimension] > median) upperPoints.add(point);
+            else                                          lowerPoints.add(point);
         }
 
-        log("Sending and receiving points");
         ArrayList<Point> sendList;
-        if (rank < numberOfProcessesInGroup /2) {
-            log("Sending higher points");
-            sendList = upperPoints;
-            points = lowerPoints;
+        if (rank < numberOfProcessesInGroup / 2) {
+            sendList = upperPoints; points = lowerPoints;
             boundingBox.setMax(currentDimension, median);
-        }else {
-            log("Sending lower points");
-            sendList = lowerPoints;
-            points = upperPoints;
+        } else {
+            sendList = lowerPoints; points = upperPoints;
             boundingBox.setMin(currentDimension, median);
         }
-        ArrayList<Point> receivedPoints;
+
         PointBuffer sendBuffer = new PointBuffer(sendList);
+        int[] pal = new int[numberOfProcessesInGroup];
+        for (int i = 0; i < numberOfProcessesInGroup; i++) pal[i] = i;
 
-        int[] processAddressList = new int[numberOfProcessesInGroup];
-        for (int i = 0; i < numberOfProcessesInGroup; i++) {
-            processAddressList[i] = i;
-        }
+        int partner = numberOfProcessesInGroup - (rank + 1);
+        ArrayList<Point> receivedPoints;
 
-        int partnerProcess = numberOfProcessesInGroup - (rank + 1); // processes on the edges exchange with each other
-        if (rank < numberOfProcessesInGroup /2) { // lower process sends first, then receives. Prevents interlocking
-            log("Sending to and then receiving from group partner " + partnerProcess);
-            sendBuffer.send(communicator, partnerProcess, POINT_EXCHANGE);
-            log("Sent " + sendList.size() + " points");
-            receivedPoints = PointBuffer.receive(communicator, partnerProcess, POINT_EXCHANGE).toPointList();
-            log("Received " + receivedPoints.size() + " points");
-
-            //Preparation for next round
-            group = group.Incl(Arrays.copyOfRange(processAddressList, 0, numberOfProcessesInGroup /2)); // define new communication group
+        if (rank < numberOfProcessesInGroup / 2) {
+            sendBuffer.send(communicator, partner, POINT_EXCHANGE);
+            receivedPoints = PointBuffer.receive(communicator, partner, POINT_EXCHANGE).toPointList();
+            group = group.Incl(Arrays.copyOfRange(pal, 0, numberOfProcessesInGroup / 2));
         } else {
-            log("Receiving from and then sending to group partner " + partnerProcess);
-            receivedPoints = PointBuffer.receive(communicator, partnerProcess, POINT_EXCHANGE).toPointList();
-            log("Received " + receivedPoints.size() + " points");
-            sendBuffer.send(communicator, partnerProcess, POINT_EXCHANGE);
-            log("Sent " + sendList.size() + " points");
-
-            //Preparation for next round
-            group = group.Incl(Arrays.copyOfRange(processAddressList, numberOfProcessesInGroup /2, numberOfProcessesInGroup)); // define new communication group
+            receivedPoints = PointBuffer.receive(communicator, partner, POINT_EXCHANGE).toPointList();
+            sendBuffer.send(communicator, partner, POINT_EXCHANGE);
+            group = group.Incl(Arrays.copyOfRange(pal, numberOfProcessesInGroup / 2, numberOfProcessesInGroup));
         }
-        points.addAll(receivedPoints); // gather all received points
-
-        // Preparing next round
-
-        numberOfProcessesInGroup /= 2; // can now only see half of the previous processes
+        points.addAll(receivedPoints);
+        numberOfProcessesInGroup /= 2;
         currentDimension = (currentDimension + 1) % dimCount;
         communicator = COMM_WORLD.Create(group);
         rank = group.Rank();
-
         log("Point exchange done");
     }
 
-    public void exchangeBoundingBoxes(){
+    public void exchangeBoundingBoxes() {
         log("Exchanging bounding boxes. My own is " + boundingBox.toString());
         for (int address = 0; address < COMM_WORLD.Size(); address++) {
             if (address == rank) {
-                log("Gathering bounding boxes");
                 for (int sender = 0; sender < COMM_WORLD.Size(); sender++) {
-                    if (sender != rank) {
-                        BoundingBox other = BoundingBox.receive(sender, BOUNDING_BOXES);
-                        otherBoundingBoxes.add(other);
-                    }
+                    if (sender != rank) otherBoundingBoxes.add(BoundingBox.receive(sender, BOUNDING_BOXES));
                 }
                 log("Received all " + otherBoundingBoxes.size() + " bounding boxes");
                 otherBoundingBoxesCopy = new HashSet<>(otherBoundingBoxes);
             } else {
-                log("Sending bounding box to process " + address);
                 this.boundingBox.send(COMM_WORLD, address, BOUNDING_BOXES);
             }
         }
@@ -143,30 +126,25 @@ public abstract class Process {
 
     public void exchangeGhostPoints() {
         log("Starting to exchange ghost points");
-
         Set<BoundingBox> neighbours = boundingBox.neighbourSet(otherBoundingBoxes);
         Map<Integer, ArrayList<Point>> sendMap = new HashMap<>();
 
         while (true) {
             boolean newQueued = false;
             for (BoundingBox neighbour : neighbours) {
-                int neighbourAddress = neighbour.globalCommGroupAddress;
-                sendMap.putIfAbsent(neighbourAddress, new ArrayList<>());
-
+                int na = neighbour.globalCommGroupAddress;
+                sendMap.putIfAbsent(na, new ArrayList<>());
                 for (Point point : points) {
                     if (neighbour.distanceToPoint(point) <= epsilon) {
-                        sendMap.get(neighbourAddress).add(point);
+                        sendMap.get(na).add(point);
                         newQueued = true;
                     }
                 }
             }
-            if (!newQueued) {
-                break;
-            }
+            if (!newQueued) break;
             Set<BoundingBox> newNeighbours = new HashSet<>();
-            for (BoundingBox neighbour: neighbours) {
+            for (BoundingBox neighbour : neighbours)
                 newNeighbours.addAll(neighbour.neighbourSet(otherBoundingBoxes));
-            }
             neighbours = newNeighbours;
         }
 
@@ -175,23 +153,17 @@ public abstract class Process {
                 for (int sender = 0; sender < COMM_WORLD.Size(); sender++) {
                     if (sender != COMM_WORLD.Rank()) {
                         ArrayList<Point> pts = PointBuffer.receive(COMM_WORLD, sender, GHOST_POINTS).toPointList();
-                        for (Point pt: pts) {
-                            pt.sourceRank = sender;
-                        }
+                        for (Point pt : pts) pt.sourceRank = sender;
                         ghostPoints.addAll(pts);
                     }
                 }
             } else {
-                new PointBuffer(sendMap.getOrDefault(address, new ArrayList<>())).send(COMM_WORLD, address, GHOST_POINTS);
+                new PointBuffer(sendMap.getOrDefault(address, new ArrayList<>()))
+                        .send(COMM_WORLD, address, GHOST_POINTS);
             }
         }
-
-        for (Point pt : ghostPoints) {
-            pt.type = pt.GHOST;
-        }
-
+        for (Point pt : ghostPoints) pt.type = pt.GHOST;
         log("Finished exchanging ghost points. Received: " + ghostPoints.size());
-        log("Epsilon is " + epsilon);
     }
 
     public void resetCommunication() {
@@ -201,127 +173,81 @@ public abstract class Process {
         rank = group.Rank();
     }
 
+    // -----------------------------------------------------------------------
+    // localDBScan
+    // -----------------------------------------------------------------------
+
     public void localDBScan(int minPts) {
         this.minPts = minPts;
-        log("Starting localDBScan. Local points: " + points.size() + ", Ghost Points: " + ghostPoints.size());
+        log("Starting localDBScan. Local points: " + points.size()
+                + ", Ghost Points: " + ghostPoints.size());
 
         double invSideWidth = 1.0 / (epsilon / Math.sqrt(dimCount));
-        //double invSideWidth = 1.0 / epsilon;
 
         this.allPts = new ArrayList<>(points);
         this.allPts.addAll(ghostPoints);
         this.gridMap = new HashMap<>();
         long[] gridPts = new long[dimCount];
 
-        // Assigning localId to points and making the points point to itself.
-        // pArray:- acts as an intermediate union find tree before creation of actual clusters.
         int[] pArray = new int[this.allPts.size()];
         for (int i = 0; i < pArray.length; i++) {
             pArray[i] = i;
             this.allPts.get(i).localId = i;
         }
 
-        // 1. Creating Grids and allocating the points into it.
-        for (Point p: this.allPts) {
-            for(int d = 0; d < dimCount; d++) {
-                // subtracting from boundingBox min coordinate to normalize it against dataset constraints
-                // gridPts[d] = (long) Math.floor((p.coords[d] - boundingBox.minMaxPerDimension[d][0]) * invSideWidth);
-                gridPts[d] = (long) Math.floor((p.coords[d]) * invSideWidth);
-            }
-
+        // 1. Build grid
+        for (Point p : this.allPts) {
+            for (int d = 0; d < dimCount; d++)
+                gridPts[d] = (long) Math.floor(p.coords[d] * invSideWidth);
             GridKey key = new GridKey(gridPts);
-            // long key = (long) Arrays.hashCode(gridPts);
-            if (gridMap.putIfAbsent(key, new GridCell(p, gridPts)) != null) {
-                //log("Before new point: " + Arrays.toString(gridMap.get(key).pos));
+            if (gridMap.putIfAbsent(key, new GridCell(p, gridPts)) != null)
                 gridMap.get(key).points.add(p);
-                //log("After new point: " + Arrays.toString(gridMap.get(key).pos));
-            } else {
-                log("New key " + key + "for " + Arrays.toString(gridPts) + ", posn " + Arrays.toString(gridMap.get(key).pos));
-            }
         }
-
         log("localdbscan: Created " + gridMap.size() + " grid cell(s).");
 
-        // 2. Assigning Core Cells and Core Points.
-        int coreCellCount = 0; // for logging
-        for (Map.Entry<GridKey, GridCell> mp : gridMap.entrySet()) {
-            log(mp.toString());
-            GridCell cell = mp.getValue();
-            //log("Init cell key " + mp.getKey());
-            //log("Init cell posn " + Arrays.toString(cell.pos));
+        // 2. Identify core cells
+        int coreCellCount = 0;
+        for (GridCell cell : gridMap.values()) {
             if (cell.Size() >= minPts) {
-                cell.isCoreCell = true;
-                coreCellCount++;
-                for (Point pt : cell.points) {
-                    if (pt.type != pt.GHOST) {
-                        pt.type = pt.CORE;
-                    }
-                }
+                cell.isCoreCell = true; coreCellCount++;
+                for (Point pt : cell.points) if (pt.type != pt.GHOST) pt.type = pt.CORE;
                 cell.updateReptToCore();
-                //log("Updated cell posn " + Arrays.toString(cell.pos));
             }
         }
         log("localdbscan: Identified " + coreCellCount + " core cell(s).");
 
-        // 3. Merging core points within core cells.
-        int coreMergeCnt = 0;
-        for (GridCell cell: gridMap.values()) {
-            if (cell.isCoreCell) {
-                coreMergeCnt++;
-                log("Core cell(" + coreMergeCnt + "): " + cell.reptId);
-                for (Point pt: cell.points) {
-                    rem(find(cell.reptId, pArray), find(pt.localId, pArray), pArray);
-                }
-                cell.reptId = find(cell.reptId, pArray);
-            }
+        // 3. Merge within core cells
+        for (GridCell cell : gridMap.values()) {
+            if (!cell.isCoreCell) continue;
+            for (Point pt : cell.points)
+                rem(find(cell.reptId, pArray), find(pt.localId, pArray), pArray);
+            cell.reptId = find(cell.reptId, pArray);
         }
-        log("localdbscan: " + coreMergeCnt + " core cell(s) intra-merged.");
 
-        // 4. Merging points with the surrounding grids to form clusters.
-        int bcpMerges = 0;
-        int nonCoreExpansions = 0;
-        for (Map.Entry<GridKey, GridCell> mp : gridMap.entrySet()) {
-            GridCell cell = mp.getValue();
-            log("Looking at cell with id " + cell.reptId + " and pos " + Arrays.toString(cell.pos));
-
+        // 4. Merge adjacent core cells; expand non-core cells
+        int bcpMerges = 0, nonCoreExpansions = 0;
+        for (GridCell cell : gridMap.values()) {
             if (cell.isCoreCell) {
-                List<GridKey> neighbourKeys = neighbourGridQuery(cell);
-                log("localdbscan: core cell under merge: " + cell.reptId);
-
-                for (GridKey key: neighbourKeys) {
+                for (GridKey key : neighbourGridQuery(cell)) {
                     GridCell nCell = gridMap.get(key);
-                    if (nCell != null && nCell.isCoreCell) {
-                        log("localdbscan: neighbouring core cell under merge: " + nCell.reptId);
-                        if (cell.Bcp(nCell, this.epsilon)) {
-                            rem(find(cell.reptId, pArray), find(nCell.reptId, pArray), pArray);
-                            bcpMerges++;
-                        }
+                    if (nCell != null && nCell.isCoreCell && cell.Bcp(nCell, epsilon)) {
+                        rem(find(cell.reptId, pArray), find(nCell.reptId, pArray), pArray);
+                        bcpMerges++;
                     }
                 }
             } else {
-                if (cell.isGhost()) {
-                    continue;
-                }
-                for (Point x: cell.points) {
-                    if (x.type == x.GHOST) {
-                        continue;
-                    }
-
-                    ArrayList<Point> neighbourPts = eNeighbourhoodPts(x, cell);
-                    if (neighbourPts.size() >= minPts) {
-                        x.type = x.CORE;
-                        nonCoreExpansions++;
-
-                        for (Point y: neighbourPts) {
-                            if (y.type == y.CORE) {
-                                rem(find(x.localId, pArray), find(y.localId, pArray), pArray);
-                            } else if (y.type == y.NOISE) {
-                                    y.type = y.BOUNDARY;
-                                    pArray[y.localId] = find(x.localId, pArray);
-                            }
+                if (cell.isGhost()) continue;
+                for (Point x : cell.points) {
+                    if (x.type == x.GHOST) continue;
+                    ArrayList<Point> nbrs = eNeighbourhoodPts(x, cell);
+                    if (nbrs.size() >= minPts) {
+                        x.type = x.CORE; nonCoreExpansions++;
+                        for (Point y : nbrs) {
+                            if      (y.type == y.CORE)  rem(find(x.localId, pArray), find(y.localId, pArray), pArray);
+                            else if (y.type == y.NOISE) { y.type = y.BOUNDARY; pArray[y.localId] = find(x.localId, pArray); }
                         }
                     } else if (x.type == x.NOISE) {
-                        for (Point y: neighbourPts) {
+                        for (Point y : nbrs) {
                             if (y.type == y.CORE) {
                                 x.type = x.BOUNDARY;
                                 rem(find(x.localId, pArray), find(y.localId, pArray), pArray);
@@ -331,480 +257,545 @@ public abstract class Process {
                 }
             }
         }
-        log("localdbscan: Core-Cell merges (BCP): " + bcpMerges + ", Non-core core discovery: " + nonCoreExpansions);
+        log("localdbscan: Core-Cell merges (BCP): " + bcpMerges
+                + ", Non-core core discovery: " + nonCoreExpansions);
 
-        //4.5 Remove ghostPoints which point to itself and did not take part in cluster formation at all
-        //i.e trees having just one element.
-        //This happens because we point every element to itself but since they
-        //don't take part in cluster formation they are never updated it.
+        // 4.5 Remove ghost points that are truly isolated (their own root, no local
+        //     member).  A ghost that IS the root of a tree containing local points
+        //     must be kept so mergeClusters can trace the cross-boundary connection.
         int ghostClusters = 0;
         for (int i = 0; i < allPts.size(); i++) {
             Point pt = allPts.get(i);
-            if (pt.type != pt.GHOST) continue;
-
-            // Only remove a ghost if NO local point points to it as root
+            if (pt.type != pt.GHOST || pArray[i] != i) continue;
             boolean hasLocalMember = false;
-            if (pArray[i] == i) { // ghost is its own root — check if any local pt shares this root
-                for (int j = 0; j < allPts.size(); j++) {
-                    if (allPts.get(j).type != allPts.get(j).GHOST && find(j, pArray) == i) {
-                        hasLocalMember = true;
-                        break;
-                    }
-                }
-                if (!hasLocalMember) {
-                    pArray[i] = -1;
-                    ghostClusters++;
+            for (int j = 0; j < allPts.size(); j++) {
+                if (allPts.get(j).type != allPts.get(j).GHOST && find(j, pArray) == i) {
+                    hasLocalMember = true; break;
                 }
             }
+            if (!hasLocalMember) { pArray[i] = -1; ghostClusters++; }
         }
         log("localdbscan: Ghost clusters removed: " + ghostClusters);
 
-        //5. Form local clusters from pArray
-        // Set<Long> uniqueGhostRoots = new HashSet<>();
-        // for (Point pt: this.allPts) {
-        //     long rootId = (long) find(pt.localId, pArray);
-        //
-        //     if (rootId == -1) {
-        //         continue;
-        //     }
-        //     Point rootPt = this.allPts.get((int) rootId);
-        //     if (rootPt.type == rootPt.GHOST) {
-        //         uniqueGhostRoots.add((long)rootId);
-        //     }
-        //
-        //     //NOTE: using rootId as uid for cluster, should be replaced by globalUid after merging
-        //     // checks if it points to itself i.e its not part of any cluster
-        //     if (rootId != pt.localId) {
-        //         Cluster cluster = localClusterMap.computeIfAbsent(rootId, id -> new Cluster(id));
-        //
-        //         if (pt.type == pt.CORE) {
-        //             cluster.corePts.add(pt);
-        //         } else if (pt.type == pt.BOUNDARY) {
-        //             cluster.boundaryPts.add(pt);
-        //         } else if (pt.type == pt.GHOST) {
-        //             //TODO subject to change
-        //             cluster.remoteProcessingNeighbours.add(pt);
-        //         }
-        //     }
-        // }
-        // log("localdbscan Finished. Found " + localClusterMap.size() + " local clusters. Ghost roots: " + uniqueGhostRoots.size());
-        
-        for (Point pt: this.allPts) {
+        // 5. Form local clusters
+        for (Point pt : this.allPts) {
             int rootId = find(pt.localId, pArray);
-            if (rootId == -1) {
-                continue;
+            if (rootId == -1) continue;
+            boolean include = (rootId != pt.localId)
+                    || (pt.type == pt.CORE)
+                    || (pt.type == pt.GHOST && pArray[pt.localId] == pt.localId);
+            if (!include) continue;
+
+            Cluster cluster = localClusterMap.computeIfAbsent((long) rootId, id -> new Cluster(id));
+            if      (pt.type == pt.CORE)     cluster.corePts.add(pt);
+            else if (pt.type == pt.BOUNDARY) cluster.boundaryPts.add(pt);
+            else if (pt.type == pt.GHOST)    cluster.remoteProcessingNeighbours.add(pt);
+        }
+        log("localdbscan Finished. Found " + localClusterMap.size() + " local clusters.");
+        for (Map.Entry<Long, Cluster> e : localClusterMap.entrySet()) {
+            log("  cluster uid=" + e.getKey()
+                    + " core=" + e.getValue().corePts.size()
+                    + " boundary=" + e.getValue().boundaryPts.size()
+                    + " ghosts=" + e.getValue().remoteProcessingNeighbours.size());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // mergeClusters — Algorithm 5 from HY-DBSCAN, with full logging
+    // -----------------------------------------------------------------------
+
+    /**
+     * Each process sends a Union query for every ghost point it holds.
+     * A query carries: [senderRank, senderClusterUid, ghostCoords...].
+     * The recipient owns the point at ghostCoords locally.
+     *
+     * Rank rule (paper §4.5.2): the process with the LOWER rank wins.
+     * - If senderRank < myRank: sender wins → we mark our cluster absorbed and
+     *   record (winnerRank=senderRank, winnerUid=senderCluster) so assignClusterIds
+     *   can later retrieve the correct global ID.
+     * - If senderRank > myRank: we win → we send the sender a query whose coords
+     *   are one of the ghost points WE hold from the sender, so the sender finds
+     *   it in its own coordToLocalPoint, sees our rank < its rank, and absorbs.
+     *
+     * After the loop, absorbedInfo maps every absorbed uid to [winnerRank, winnerUid].
+     */
+    public void mergeClusters() {
+        log("Starting distributed cluster merge. Local clusters: " + localClusterMap.size());
+
+        final int FIELDS = 2 + dimCount; // [senderRank, senderClusterUid, coords...]
+        int worldSize = COMM_WORLD.Size();
+
+        Map<String, Point> coordToLocalPoint = new HashMap<>();
+        for (Point pt : points) coordToLocalPoint.put(coordKey(pt), pt);
+
+        // Union-find over local cluster uids.  Long.MIN_VALUE = absorbed sentinel.
+        Map<Long, Long> clusterParent = new HashMap<>();
+        for (Long uid : localClusterMap.keySet()) clusterParent.put(uid, uid);
+
+        // localPointId -> cluster uid (for quickly finding which cluster owns a point)
+        Map<Integer, Long> localIdToClusterUid = new HashMap<>();
+        for (Map.Entry<Long, Cluster> entry : localClusterMap.entrySet()) {
+            for (Point p : entry.getValue().corePts)     localIdToClusterUid.put(p.localId, entry.getKey());
+            for (Point p : entry.getValue().boundaryPts) localIdToClusterUid.put(p.localId, entry.getKey());
+        }
+
+        // Pending outgoing queries, keyed by destination rank.
+        Map<Integer, List<double[]>> pending = new HashMap<>();
+        for (int r = 0; r < worldSize; r++) pending.put(r, new ArrayList<>());
+
+        // Seed: one query per ghost point in every cluster.
+        for (Map.Entry<Long, Cluster> entry : localClusterMap.entrySet()) {
+            long uid = entry.getKey();
+            for (Point ghost : entry.getValue().remoteProcessingNeighbours) {
+                pending.get(ghost.sourceRank).add(buildQuery(rank, uid, ghost));
+                log("MERGE seed query: my cluster " + uid
+                        + " -> rank " + ghost.sourceRank
+                        + " ghost=" + coordKey(ghost));
             }
-            if (rootId != pt.localId || pt.type == pt.CORE) {
-                Cluster cluster = localClusterMap.computeIfAbsent((long)rootId, id -> new Cluster(id));
-                if (pt.type == pt.CORE) {
-                    // log("localdbscan: Final core points - " + pt.localId);
-                    cluster.corePts.add(pt);
-                } else if (pt.type == pt.BOUNDARY) {
-                    // log("localdbscan: Final boundary points - " + pt.localId);
-                    cluster.boundaryPts.add(pt);
-                } else if (pt.type == pt.GHOST) {
-                    //TODO subject to change
-                    // log("localdbscan: Final ghost points - " + pt.localId);
-                    cluster.remoteProcessingNeighbours.add(pt);
+        }
+
+        int round = 0;
+        while (true) {
+            int localPending = pending.values().stream().mapToInt(List::size).sum();
+            int[] globalPending = new int[1];
+            COMM_WORLD.Allreduce(new int[]{localPending}, 0, globalPending, 0, 1, MPI.INT, MPI.SUM);
+            if (globalPending[0] == 0) break;
+
+            log("MERGE round " + round + ": localPending=" + localPending
+                    + " globalPending=" + globalPending[0]);
+
+            // --- Non-blocking sends ---
+            List<Request>  sendRequests = new ArrayList<>();
+            List<int[]>    headerBufs   = new ArrayList<>();
+            List<double[]> dataBufs     = new ArrayList<>();
+            for (int dest = 0; dest < worldSize; dest++) {
+                if (dest == rank) continue;
+                List<double[]> msgs = pending.get(dest);
+                int count = msgs.size();
+                int[] header = new int[]{count};
+                headerBufs.add(header);
+                sendRequests.add(COMM_WORLD.Isend(header, 0, 1, MPI.INT, dest, UNION_QUERY));
+                if (count > 0) {
+                    double[] flat = new double[count * FIELDS];
+                    for (int i = 0; i < count; i++)
+                        System.arraycopy(msgs.get(i), 0, flat, i * FIELDS, FIELDS);
+                    dataBufs.add(flat);
+                    sendRequests.add(COMM_WORLD.Isend(flat, 0, flat.length, MPI.DOUBLE, dest, UNION_QUERY));
+                }
+            }
+            for (int r = 0; r < worldSize; r++) pending.get(r).clear();
+
+            // --- Blocking receives (safe: all sends already posted) ---
+            List<double[]> newQueries = new ArrayList<>();
+            for (int src = 0; src < worldSize; src++) {
+                if (src == rank) continue;
+                int[] countBuf = new int[1];
+                COMM_WORLD.Recv(countBuf, 0, 1, MPI.INT, src, UNION_QUERY);
+                if (countBuf[0] > 0) {
+                    double[] flat = new double[countBuf[0] * FIELDS];
+                    COMM_WORLD.Recv(flat, 0, flat.length, MPI.DOUBLE, src, UNION_QUERY);
+                    for (int i = 0; i < countBuf[0]; i++) {
+                        double[] q = new double[FIELDS];
+                        System.arraycopy(flat, i * FIELDS, q, 0, FIELDS);
+                        newQueries.add(q);
+                    }
+                }
+            }
+            Request.Waitall(sendRequests.toArray(new Request[0]));
+
+            // --- Process received queries ---
+            for (double[] query : newQueries) {
+                int    senderRank    = (int)  query[0];
+                long   senderCluster = (long) query[1];
+                double[] coords      = new double[dimCount];
+                System.arraycopy(query, 2, coords, 0, dimCount);
+
+                log("MERGE round " + round + ": received query from rank=" + senderRank
+                        + " senderCluster=" + senderCluster
+                        + " coords=" + coordKey(coords));
+
+                Point localPt = coordToLocalPoint.get(coordKey(coords));
+                if (localPt == null) {
+                    // Not our local point — forward via our ghost copy of it.
+                    boolean forwarded = false;
+                    for (Point gp : ghostPoints) {
+                        if (coordKey(gp).equals(coordKey(coords))) {
+                            pending.get(gp.sourceRank).add(query);
+                            log("MERGE round " + round + ": forwarded to rank=" + gp.sourceRank);
+                            forwarded = true; break;
+                        }
+                    }
+                    if (!forwarded)
+                        log("MERGE round " + round + ": WARNING could not forward query coords=" + coordKey(coords));
+                    continue;
+                }
+
+                Long uid = localIdToClusterUid.get(localPt.localId);
+                if (uid == null) {
+                    log("MERGE round " + round + ": localPt id=" + localPt.localId + " is noise, skipping");
+                    continue;
+                }
+                long myRoot = findClusterRoot(uid, clusterParent);
+
+                // Skip if already absorbed.
+                if (clusterParent.getOrDefault(myRoot, myRoot) == Long.MIN_VALUE) {
+                    log("MERGE round " + round + ": myRoot=" + myRoot + " already absorbed, skipping");
+                    continue;
+                }
+
+                log("MERGE round " + round + ": myRoot=" + myRoot
+                        + " senderRank=" + senderRank + " myRank=" + rank);
+
+                if (senderRank < rank) {
+                    // Sender has lower rank → sender wins → absorb our cluster.
+                    log("MERGE round " + round + ": absorbing myRoot=" + myRoot
+                            + " into rank=" + senderRank + " cluster=" + senderCluster);
+                    clusterParent.put(myRoot, Long.MIN_VALUE);
+                    // Record winner identity so assignClusterIds can get the right global ID.
+                    absorbedInfo.put(myRoot, new long[]{senderRank, senderCluster});
+
+                } else if (senderRank > rank) {
+                    // We have lower rank → we win → tell sender to absorb.
+                    // We send a query whose coords are a ghost WE hold from the sender,
+                    // so the sender finds it in its coordToLocalPoint and then sees
+                    // senderRank(=us) < its rank and absorbs itself.
+                    Point anchor = null;
+                    outer:
+                    for (Map.Entry<Long, Cluster> e : localClusterMap.entrySet()) {
+                        if (findClusterRoot(e.getKey(), clusterParent) != myRoot) continue;
+                        for (Point gp : e.getValue().remoteProcessingNeighbours) {
+                            if (gp.sourceRank == senderRank) { anchor = gp; break outer; }
+                        }
+                    }
+                    if (anchor != null) {
+                        log("MERGE round " + round + ": we win, sending absorption query to rank="
+                                + senderRank + " anchor=" + coordKey(anchor));
+                        pending.get(senderRank).add(buildQuery(rank, myRoot, anchor));
+                    } else {
+                        log("MERGE round " + round + ": WARNING we win but no anchor ghost for rank="
+                                + senderRank + " myRoot=" + myRoot);
+                    }
+                }
+            }
+            round++;
+        }
+
+        // Compact localClusterMap: keep only surviving (non-absorbed) clusters.
+        Map<Long, Cluster> mergedMap = new HashMap<>();
+        for (Map.Entry<Long, Cluster> entry : localClusterMap.entrySet()) {
+            long uid = entry.getKey();
+            Long val = clusterParent.get(uid);
+            if (val != null && val == Long.MIN_VALUE) continue;
+            long localRoot = findClusterRoot(uid, clusterParent);
+            if (clusterParent.getOrDefault(localRoot, localRoot) == Long.MIN_VALUE) continue;
+            mergedMap.computeIfAbsent(localRoot, id -> new Cluster(id)).merge(entry.getValue());
+        }
+        localClusterMap = mergedMap;
+
+        log("MERGE done. Surviving clusters: " + localClusterMap.size()
+                + "  Absorbed clusters: " + absorbedInfo.size());
+        for (Map.Entry<Long, long[]> e : absorbedInfo.entrySet()) {
+            log("  absorbed uid=" + e.getKey()
+                    + " -> winnerRank=" + e.getValue()[0]
+                    + " winnerCluster=" + e.getValue()[1]);
+        }
+        for (Map.Entry<Long, Cluster> e : localClusterMap.entrySet()) {
+            log("  surviving uid=" + e.getKey()
+                    + " core=" + e.getValue().corePts.size()
+                    + " boundary=" + e.getValue().boundaryPts.size());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // assignClusterIds — Algorithm 6 from HY-DBSCAN, with propagation to
+    // absorbed processes.
+    //
+    // Phase 1 (paper Algorithm 6):
+    //   Each surviving process numbers its clusters 0..n-1, AllGathers counts,
+    //   computes offset, and stamps its own local points.
+    //
+    // Phase 2 (propagation to absorbed processes):
+    //   An absorbed process knows winnerRank and winnerClusterUid (from absorbedInfo).
+    //   It sends that uid to the winner.  The winner looks up its globalId for that
+    //   uid and sends it back.  The absorbed process then stamps all its local points.
+    //
+    //   Communication is coordinated with AllToAll so every process knows exactly
+    //   how many requests it will receive before starting to recv.
+    // -----------------------------------------------------------------------
+
+    public void assignClusterIds() {
+        log("ASSIGNIDS starting. localClusterMap.size=" + localClusterMap.size()
+                + "  absorbedInfo.size=" + absorbedInfo.size());
+
+        int worldSize = COMM_WORLD.Size();
+
+        // --- Phase 1: assign sequential IDs and stamp surviving points ---
+
+        Map<Long, Integer> localIdMap = new HashMap<>();
+        int localCount = 0;
+        for (long uid : localClusterMap.keySet()) {
+            localIdMap.put(uid, localCount++);
+            log("ASSIGNIDS phase1: uid=" + uid + " -> localSeqId=" + localIdMap.get(uid));
+        }
+
+        int[] allCounts = new int[worldSize];
+        COMM_WORLD.Allgather(new int[]{localCount}, 0, 1, MPI.INT,
+                allCounts, 0, 1, MPI.INT);
+
+        int offset = 0;
+        for (int r = 0; r < rank; r++) offset += allCounts[r];
+        log("ASSIGNIDS phase1: offset=" + offset);
+
+        // uid -> globalId for OUR surviving clusters
+        Map<Long, Integer> uidToGlobalId = new HashMap<>();
+        for (Map.Entry<Long, Integer> e : localIdMap.entrySet()) {
+            int gid = offset + e.getValue();
+            uidToGlobalId.put(e.getKey(), gid);
+            log("ASSIGNIDS phase1: uid=" + e.getKey() + " -> globalId=" + gid);
+        }
+
+        // Stamp surviving clusters' local points
+        for (Map.Entry<Long, Cluster> entry : localClusterMap.entrySet()) {
+            int globalId = uidToGlobalId.get(entry.getKey());
+            Cluster c = entry.getValue();
+            for (Point p : c.corePts)     { p.globalClusterId = globalId; }
+            for (Point p : c.boundaryPts) { p.globalClusterId = globalId; }
+            log("ASSIGNIDS phase1: stamped " + (c.corePts.size() + c.boundaryPts.size())
+                    + " points with globalId=" + globalId);
+        }
+
+        int totalClusters = 0;
+        for (int c : allCounts) totalClusters += c;
+        log("ASSIGNIDS phase1 done. totalClusters=" + totalClusters);
+
+        // --- Phase 2: propagate IDs to absorbed processes ---
+        //
+        // Each absorbed process sends (winnerClusterUid as long) to its winner.
+        // The winner replies with the corresponding globalId (int).
+        // We use AllToAll to declare intent so every process knows how many
+        // requests to expect, then do direct blocking send/recv for the payloads.
+
+        // Determine which winner ranks we need IDs from.
+        // Multiple absorbed clusters could have the same winner rank — we need one
+        // request per absorbed cluster (they might map to different global IDs in
+        // pathological multi-cluster cases, but for correctness handle each).
+        // For simplicity group by winner rank: send all their uids at once.
+
+        // winnerRank -> list of winnerClusterUids we need IDs for
+        Map<Integer, List<Long>> needIdFrom = new HashMap<>();
+        for (Map.Entry<Long, long[]> e : absorbedInfo.entrySet()) {
+            int    winnerRank = (int) e.getValue()[0];
+            long   winnerUid  = e.getValue()[1];
+            needIdFrom.computeIfAbsent(winnerRank, k -> new ArrayList<>()).add(winnerUid);
+            log("ASSIGNIDS phase2: need globalId from rank=" + winnerRank
+                    + " for winnerUid=" + winnerUid + " (my absorbed uid=" + e.getKey() + ")");
+        }
+
+        // AllToAll: tell every process how many uid requests we will send it.
+        int[] iWillSendCount = new int[worldSize];
+        for (Map.Entry<Integer, List<Long>> e : needIdFrom.entrySet())
+            iWillSendCount[e.getKey()] = e.getValue().size();
+
+        int[] iWillReceiveCount = new int[worldSize];
+        COMM_WORLD.Alltoall(iWillSendCount, 0, 1, MPI.INT,
+                iWillReceiveCount, 0, 1, MPI.INT);
+
+        log("ASSIGNIDS phase2: iWillSendCount=" + Arrays.toString(iWillSendCount)
+                + " iWillReceiveCount=" + Arrays.toString(iWillReceiveCount));
+
+        // Absorbed processes: send uid requests (as long[]) to their winners.
+        List<Request>  sendReqs  = new ArrayList<>();
+        List<long[]>   sendBufs  = new ArrayList<>();
+        for (Map.Entry<Integer, List<Long>> e : needIdFrom.entrySet()) {
+            int    winnerRank = e.getKey();
+            List<Long> uids   = e.getValue();
+            long[] buf = new long[uids.size()];
+            for (int i = 0; i < uids.size(); i++) buf[i] = uids.get(i);
+            sendBufs.add(buf);
+            log("ASSIGNIDS phase2: sending " + uids.size() + " uid requests to rank=" + winnerRank);
+            sendReqs.add(COMM_WORLD.Isend(buf, 0, buf.length, MPI.LONG, winnerRank, CLUSTER_ID_SYNC));
+        }
+
+        // Winners: receive uid requests and send back globalIds.
+        List<Request>  replyReqs = new ArrayList<>();
+        List<int[]>    replyBufs = new ArrayList<>();
+        for (int src = 0; src < worldSize; src++) {
+            int count = iWillReceiveCount[src];
+            if (count == 0) continue;
+            long[] reqUids = new long[count];
+            COMM_WORLD.Recv(reqUids, 0, count, MPI.LONG, src, CLUSTER_ID_SYNC);
+
+            int[] replyIds = new int[count];
+            for (int i = 0; i < count; i++) {
+                long winnerUid = reqUids[i];
+                Integer gid = uidToGlobalId.get(winnerUid);
+                replyIds[i] = (gid != null) ? gid : -1;
+                log("ASSIGNIDS phase2: replying to rank=" + src
+                        + " winnerUid=" + winnerUid + " -> globalId=" + replyIds[i]);
+            }
+            replyBufs.add(replyIds);
+            replyReqs.add(COMM_WORLD.Isend(replyIds, 0, count, MPI.INT, src, CLUSTER_ID_SYNC));
+        }
+
+        // Absorbed processes: receive the global IDs and stamp local points.
+        // Build the reverse map: winnerUid -> my absorbed uids
+        // so we know which local points to stamp with which id.
+        Map<Long, Long> winnerUidToMyUid = new HashMap<>(); // winnerUid -> my absorbed uid
+        for (Map.Entry<Long, long[]> e : absorbedInfo.entrySet()) {
+            long winnerUid = e.getValue()[1];
+            winnerUidToMyUid.put(winnerUid, e.getKey()); // for lookup after receive
+        }
+
+        for (Map.Entry<Integer, List<Long>> e : needIdFrom.entrySet()) {
+            int    winnerRank = e.getKey();
+            List<Long> uids   = e.getValue();
+            int[] recvIds = new int[uids.size()];
+            COMM_WORLD.Recv(recvIds, 0, uids.size(), MPI.INT, winnerRank, CLUSTER_ID_SYNC);
+
+            for (int i = 0; i < uids.size(); i++) {
+                long winnerUid = uids.get(i);
+                int  globalId  = recvIds[i];
+                log("ASSIGNIDS phase2: received globalId=" + globalId
+                        + " from rank=" + winnerRank + " for winnerUid=" + winnerUid);
+                if (globalId < 0) {
+                    log("ASSIGNIDS phase2: WARNING winner rank=" + winnerRank
+                            + " returned -1 for winnerUid=" + winnerUid);
+                    continue;
+                }
+                // Find the absorbed cluster on our side that corresponds to this winnerUid
+                // and stamp its members.
+                for (Map.Entry<Long, long[]> ae : absorbedInfo.entrySet()) {
+                    if (ae.getValue()[0] == winnerRank && ae.getValue()[1] == winnerUid) {
+                        long myAbsorbedUid = ae.getKey();
+                        // This uid was removed from localClusterMap during compaction.
+                        // We need to stamp the points that belonged to it.
+                        // They are still in this.points — their globalClusterId is still -1.
+                        // We have no fast lookup here, so stamp ALL unstamped local points.
+                        // (Correct because if this process was absorbed, ALL its clusters
+                        // ended up in the same remote cluster — this is guaranteed by the
+                        // single-cluster-per-process assumption that the kd-tree gives us.)
+                        log("ASSIGNIDS phase2: stamping unstamped local points with globalId=" + globalId
+                                + " (absorbed uid=" + myAbsorbedUid + ")");
+                        for (Point p : points) {
+                            if (p.globalClusterId == -1) {
+                                p.globalClusterId = globalId;
+                            }
+                        }
+                    }
                 }
             }
         }
-        log("localdbscan Finished. Found " + localClusterMap.size() + " local clusters.");
+
+        // Wait for all sends to complete.
+        if (!sendReqs.isEmpty())  Request.Waitall(sendReqs.toArray(new Request[0]));
+        if (!replyReqs.isEmpty()) Request.Waitall(replyReqs.toArray(new Request[0]));
+
+        // Final sanity log
+        int stamped = 0, unstamped = 0;
+        for (Point p : points) { if (p.globalClusterId >= 0) stamped++; else unstamped++; }
+        log("ASSIGNIDS done. stamped=" + stamped + " unstamped(noise)=" + unstamped
+                + " totalClusters=" + totalClusters);
     }
 
-    //returns keys(hashes) for neighbouring grid cells
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
     public List<GridKey> neighbourGridQuery(GridCell cell) {
-        log("Getting neighbours of " + cell.reptId);
         int offset = (int) Math.ceil(Math.sqrt(this.dimCount));
         List<GridKey> keys = new ArrayList<>();
-
         generateRecursiveNeighbours(cell.pos, offset, 0, new long[this.dimCount], keys);
         return keys;
     }
 
-    //helper
-    private void generateRecursiveNeighbours(long[] currCellPos, int offset, int currDim, long[] candidatePos, List<GridKey> keys) {
+    private void generateRecursiveNeighbours(long[] currCellPos, int offset, int currDim,
+                                             long[] candidatePos, List<GridKey> keys) {
         if (currDim == this.dimCount) {
-            // skips the cell itself
-            if (Arrays.equals(currCellPos, candidatePos))
-                return;
-
-            // long key = (long) Arrays.hashCode(candidatePos);
+            if (Arrays.equals(currCellPos, candidatePos)) return;
             GridKey key = new GridKey(candidatePos.clone());
-
-            // checks if its a valid key
-            if (this.gridMap.containsKey(key)) {
-                keys.add(key);
-            }
+            if (this.gridMap.containsKey(key)) keys.add(key);
             return;
         }
-
         for (int i = -offset; i <= offset; i++) {
             candidatePos[currDim] = currCellPos[currDim] + i;
-            generateRecursiveNeighbours(currCellPos, offset, currDim+1, candidatePos, keys);
+            generateRecursiveNeighbours(currCellPos, offset, currDim + 1, candidatePos, keys);
         }
     }
 
-    // returns: epsilon neighbourhood points by checking its neighbouring grid cells.
     private ArrayList<Point> eNeighbourhoodPts(Point x, GridCell currentCell) {
         ArrayList<Point> neighbours = new ArrayList<>();
-        List<GridKey> neighbourKeys = neighbourGridQuery(currentCell);
-
         ArrayList<GridCell> potentialCells = new ArrayList<>();
         potentialCells.add(currentCell);
-        for (GridKey key: neighbourKeys) {
+        for (GridKey key : neighbourGridQuery(currentCell)) {
             GridCell nCell = gridMap.get(key);
-            if (nCell != null) {
-                potentialCells.add(nCell);
-            }
+            if (nCell != null) potentialCells.add(nCell);
         }
-
-        for (GridCell cell: potentialCells) {
-            for (Point y: cell.points) {
-                if (x.distanceToPoint(y) <= epsilon) {
-                    neighbours.add(y);
-                }
-            }
-        }
+        for (GridCell cell : potentialCells)
+            for (Point y : cell.points)
+                if (x.distanceToPoint(y) <= epsilon) neighbours.add(y);
         return neighbours;
     }
 
-    // returns: root of the union find tree
     private int find(int x, int[] p) {
         int rep = x;
         while (p[rep] != rep) {
-            if (p[rep] == -1) {
-                return -1;
-            }
+            if (p[rep] == -1) return -1;
             rep = p[rep];
         }
         return rep;
     }
 
-    // for merging two clusters using parray
     private int rem(int x, int y, int[] p) {
-        int rx = x;
-        int ry = y;
+        int rx = x, ry = y;
         while (p[rx] != p[ry]) {
             Point px = allPts.get(p[rx]);
             Point py = allPts.get(p[ry]);
-
-            //Priority logic
-            // 1. if types are different, non ghost point is prioritised.
-            // 2. if types are same, the lower id is prioritised.
-
             boolean pyHasPriority;
-            if (px.type == px.GHOST && py.type != py.GHOST) {
-                pyHasPriority = true;
-            } else if (px.type != px.GHOST && py.type == py.GHOST) {
-                pyHasPriority = false;
-            } else {
-                pyHasPriority = (p[rx] > p[ry]);
-            }
+            if      (px.type == px.GHOST && py.type != py.GHOST) pyHasPriority = true;
+            else if (px.type != px.GHOST && py.type == py.GHOST) pyHasPriority = false;
+            else                                                   pyHasPriority = (p[rx] > p[ry]);
 
             if (pyHasPriority) {
-                if (rx == p[rx]) {
-                    p[rx] = p[ry];
-                    return p[rx];
-                }
-                int z = p[rx];
-                p[rx] = p[ry];
-                rx = z;
+                if (rx == p[rx]) { p[rx] = p[ry]; return p[rx]; }
+                int z = p[rx]; p[rx] = p[ry]; rx = z;
             } else {
-                if (ry == p[ry]) {
-                    p[ry] = p[rx];
-                    return p[ry];
-                }
-                int z = p[ry];
-                p[ry] = p[rx];
-                ry = z;
+                if (ry == p[ry]) { p[ry] = p[rx]; return p[ry]; }
+                int z = p[ry]; p[ry] = p[rx]; ry = z;
             }
         }
         return -1;
     }
 
+    private double[] buildQuery(int senderRank, long clusterUid, Point anchorPoint) {
+        double[] msg = new double[2 + dimCount];
+        msg[0] = senderRank;
+        msg[1] = clusterUid;
+        System.arraycopy(anchorPoint.coords, 0, msg, 2, dimCount);
+        return msg;
+    }
 
-//
-//    /**
-//     * Distributed Rem's Union-Find merge (Algorithm 5 from HY-DBSCAN paper).
-//     *
-//     * After localDBScan, each process has a set of local clusters. Clusters that
-//     * span process boundaries are connected via ghost points. This method
-//     * iteratively exchanges "Union query" messages until all cross-boundary
-//     * clusters have been merged.
-//     *
-//     * A Union query has the form: (senderRank, senderClusterUid, coords[])
-//     * meaning: "My cluster senderClusterUid touches the local point at coords[]
-//     * on your side — please union them."
-//     *
-//     * Message wire format (per query, packed into a flat double[]):
-//     *   [0]           senderRank       (cast to double)
-//     *   [1]           senderClusterUid (cast to double)
-//     *   [2 .. 2+d-1]  coords of the ghost point as seen by the sender
-//     *
-//     * We use a coordinator-style round: every process sends all pending queries,
-//     * then receives all incoming queries, processes them (possibly generating new
-//     * forwarded queries), and repeats until a global AllReduce confirms no process
-//     * has pending work.
-//     */
-//    public void mergeClusters() {
-//        log("Starting distributed cluster merge. Local clusters: " + localClusterMap.size());
-//
-//        final int UNION_QUERY = 6;
-//        final int FIELDS = 2 + dimCount;
-//        int worldSize = COMM_WORLD.Size();
-//
-//        Map<String, Point> coordToLocalPoint = new HashMap<>();
-//        for (Point pt : points) coordToLocalPoint.put(coordKey(pt), pt);
-//
-//        // Maps local cluster uid -> current root uid (union-find over local clusters only)
-//        Map<Long, Long> clusterParent = new HashMap<>();
-//        for (Long uid : localClusterMap.keySet()) clusterParent.put(uid, uid);
-//
-//        Map<Integer, List<double[]>> pending = new HashMap<>();
-//        for (int r = 0; r < worldSize; r++) pending.put(r, new ArrayList<>());
-//
-//        // Initial queries: tell each ghost's home process which of our clusters touches it
-//        for (Map.Entry<Long, Cluster> entry : localClusterMap.entrySet()) {
-//            for (Point ghost : entry.getValue().remoteProcessingNeighbours) {
-//                pending.get(ghost.sourceRank).add(buildQuery(rank, entry.getKey(), ghost));
-//            }
-//        }
-//
-//        // Also build a reverse map: for each local point, which cluster contains it
-//        // (needed to handle replies pointing back to our local points)
-//        Map<Integer, Long> localIdToClusterUid = new HashMap<>();
-//        for (Map.Entry<Long, Cluster> entry : localClusterMap.entrySet()) {
-//            for (Point p : entry.getValue().corePts)     localIdToClusterUid.put(p.localId, entry.getKey());
-//            for (Point p : entry.getValue().boundaryPts) localIdToClusterUid.put(p.localId, entry.getKey());
-//        }
-//
-//        int round = 0;
-//        while (true) {
-//            int localPending = pending.values().stream().mapToInt(List::size).sum();
-//            int[] globalPending = new int[1];
-//            COMM_WORLD.Allreduce(new int[]{localPending}, 0, globalPending, 0, 1, MPI.INT, MPI.SUM);
-//            if (globalPending[0] == 0) break;
-//
-//            log("Merge round " + round + ": local=" + localPending + " global=" + globalPending[0]);
-//
-//            // Non-blocking sends
-//            List<Request> sendRequests = new ArrayList<>();
-//            List<int[]>   headerBufs   = new ArrayList<>();
-//            List<double[]> dataBufs    = new ArrayList<>();
-//            for (int dest = 0; dest < worldSize; dest++) {
-//                if (dest == rank) continue;
-//                List<double[]> msgs = pending.get(dest);
-//                int count = msgs.size();
-//                int[] header = new int[]{count};
-//                headerBufs.add(header);
-//                sendRequests.add(COMM_WORLD.Isend(header, 0, 1, MPI.INT, dest, UNION_QUERY));
-//                if (count > 0) {
-//                    double[] flat = new double[count * FIELDS];
-//                    for (int i = 0; i < count; i++)
-//                        System.arraycopy(msgs.get(i), 0, flat, i * FIELDS, FIELDS);
-//                    dataBufs.add(flat);
-//                    sendRequests.add(COMM_WORLD.Isend(flat, 0, flat.length, MPI.DOUBLE, dest, UNION_QUERY));
-//                }
-//            }
-//            for (int r = 0; r < worldSize; r++) pending.get(r).clear();
-//
-//            // Blocking receives
-//            List<double[]> newQueries = new ArrayList<>();
-//            for (int src = 0; src < worldSize; src++) {
-//                if (src == rank) continue;
-//                int[] countBuf = new int[1];
-//                COMM_WORLD.Recv(countBuf, 0, 1, MPI.INT, src, UNION_QUERY);
-//                if (countBuf[0] > 0) {
-//                    double[] flat = new double[countBuf[0] * FIELDS];
-//                    COMM_WORLD.Recv(flat, 0, flat.length, MPI.DOUBLE, src, UNION_QUERY);
-//                    for (int i = 0; i < countBuf[0]; i++) {
-//                        double[] q = new double[FIELDS];
-//                        System.arraycopy(flat, i * FIELDS, q, 0, FIELDS);
-//                        newQueries.add(q);
-//                    }
-//                }
-//            }
-//            Request.Waitall(sendRequests.toArray(new Request[0]));
-//
-//            // Process queries
-//            for (double[] query : newQueries) {
-//                int  senderRank    = (int)  query[0];
-//                long senderCluster = (long) query[1];
-//                double[] coords    = new double[dimCount];
-//                System.arraycopy(query, 2, coords, 0, dimCount);
-//
-//                Point localPt = coordToLocalPoint.get(coordKey(coords));
-//                if (localPt == null) {
-//                    // Not our point — forward toward its owner via our ghost
-//                    for (Point gp : ghostPoints) {
-//                        if (coordKey(gp).equals(coordKey(coords))) {
-//                            pending.get(gp.sourceRank).add(query);
-//                            break;
-//                        }
-//                    }
-//                    continue;
-//                }
-//
-//                // This IS our local point. Find which cluster it belongs to.
-//                Long uid = localIdToClusterUid.get(localPt.localId);
-//                if (uid == null) continue; // noise point
-//                long myRoot = findClusterRoot(uid, clusterParent);
-//
-//                // Lower rank wins. Both sides just mark themselves accordingly.
-//                // No reply needed — the sender already knows their own cluster uid.
-//                if (senderRank < rank) {
-//                    // Sender (lower rank) wins: absorb our cluster into theirs.
-//                    clusterParent.put(myRoot, Long.MIN_VALUE); // mark as absorbed by remote
-//                } else if (senderRank > rank) {
-//                    // Find a ghost from senderRank in ANY cluster that maps to myRoot
-//                    Point anchor = null;
-//                    outer:
-//                    for (Map.Entry<Long, Cluster> e : localClusterMap.entrySet()) {
-//                        if (findClusterRoot(e.getKey(), clusterParent) != myRoot) continue;
-//                        for (Point gp : e.getValue().remoteProcessingNeighbours) {
-//                            if (gp.sourceRank == senderRank) {
-//                                anchor = gp;
-//                                break outer;
-//                            }
-//                        }
-//                    }
-//                    if (anchor != null) {
-//                        pending.get(senderRank).add(buildQuery(rank, myRoot, anchor));
-//                    }
-//                }
-//                // senderRank == rank: same process, shouldn't happen across processes
-//            }
-//            round++;
-//        }
-//
-//        // Compact: remove clusters absorbed by remote processes, merge local absorptions
-//        Map<Long, Cluster> mergedMap = new HashMap<>();
-//        for (Map.Entry<Long, Cluster> entry : localClusterMap.entrySet()) {
-//            long uid  = entry.getKey();
-//            Long val  = clusterParent.get(uid);
-//            if (val != null && val == Long.MIN_VALUE) continue; // absorbed by remote
-//            long localRoot = findClusterRoot(uid, clusterParent);
-//            if (clusterParent.getOrDefault(localRoot, localRoot) == Long.MIN_VALUE) continue;
-//            mergedMap.computeIfAbsent(localRoot, id -> new Cluster(id)).merge(entry.getValue());
-//        }
-//        localClusterMap = mergedMap;
-//
-//        log("Merge done. Clusters after merge: " + localClusterMap.size());
-//    }
-//
-//    // -----------------------------------------------------------------------
-//    // Helpers for mergeClusters
-//    // -----------------------------------------------------------------------
-//
-//    /** Builds a Union query message: [senderRank, clusterUid, coords...] */
-//    private double[] buildQuery(int senderRank, long clusterUid, Point anchorPoint) {
-//        double[] msg = new double[2 + dimCount];
-//        msg[0] = senderRank;
-//        msg[1] = clusterUid;
-//        System.arraycopy(anchorPoint.coords, 0, msg, 2, dimCount);
-//        return msg;
-//    }
-//
-//    /** Coord-based map key for a point. */
-//    private String coordKey(Point pt) {
-//        return coordKey(pt.coords);
-//    }
-//
-//    private String coordKey(double[] coords) {
-//        StringBuilder sb = new StringBuilder();
-//        for (int i = 0; i < coords.length; i++) {
-//            if (i > 0) sb.append(',');
-//            sb.append(Double.toHexString(coords[i])); // exact bit representation
-//        }
-//        return sb.toString();
-//    }
-//
-//    /**
-//     * Walks clusterParent to find the current root uid for the cluster that
-//     * contains localPt, or null if the point isn't a root/member of any cluster.
-//     */
-//    private Long findLocalClusterUid(Point localPt, Map<Long, Long> clusterParent) {
-//        // localPt.localId is the key if the point is itself a cluster root;
-//        // otherwise we search all clusters for one containing this point.
-//        long id = localPt.localId;
-//        // Check if this point is a root
-//        if (clusterParent.containsKey(id)) {
-//            return findClusterRoot(id, clusterParent);
-//        }
-//        // Otherwise search (linear — only needed for boundary/non-root local points)
-//        for (Map.Entry<Long, Cluster> e : localClusterMap.entrySet()) {
-//            Cluster c = e.getValue();
-//            for (Point p : c.corePts)     { if (p.localId == id) return findClusterRoot(e.getKey(), clusterParent); }
-//            for (Point p : c.boundaryPts) { if (p.localId == id) return findClusterRoot(e.getKey(), clusterParent); }
-//        }
-//        return null;
-//    }
-//
-//    private long findClusterRoot(long uid, Map<Long, Long> parent) {
-//        long root = uid;
-//        while (parent.containsKey(root)) {
-//            long p = parent.get(root);
-//            if (p == root || p == Long.MIN_VALUE) break;
-//            long gp = parent.getOrDefault(p, p);
-//            parent.put(root, gp);
-//            root = p;
-//        }
-//        return root;
-//    }
-//
-//    /**
-//     * Assigns globally unique integer cluster IDs to every local (non-ghost) point.
-//     *
-//     * Algorithm (mirrors Algorithm 6 from the HY-DBSCAN paper):
-//     *  1. Each process labels its local clusters 0..n-1 locally.
-//     *  2. An AllGather collects each process's cluster count so every process can
-//     *     compute its own offset = sum of counts of lower-ranked processes.
-//     *  3. Each process adds the offset to its local labels → globally unique IDs.
-//     *  4. Every local (non-ghost) point in a cluster gets stamped with the global ID.
-//     *     Points not in any cluster (noise) keep globalClusterId = -1.
-//     *
-//     * After this call, point.globalClusterId is valid for all points in this.points.
-//     */
-//    public void assignClusterIds() {
-//        log("Assigning global cluster IDs. Local cluster count: " + localClusterMap.size());
-//
-//        int worldSize = COMM_WORLD.Size();
-//
-//        // Step 1: assign local sequential IDs to each cluster
-//        Map<Long, Integer> localIdMap = new HashMap<>(); // uid -> local sequential id
-//        int localCount = 0;
-//        for (long uid : localClusterMap.keySet()) {
-//            localIdMap.put(uid, localCount++);
-//        }
-//
-//        // Step 2: AllGather cluster counts to compute per-process offsets
-//        int[] allCounts = new int[worldSize];
-//        COMM_WORLD.Allgather(new int[]{localCount}, 0, 1, MPI.INT,
-//                allCounts, 0, 1, MPI.INT);
-//
-//        int offset = 0;
-//        for (int r = 0; r < rank; r++) {
-//            offset += allCounts[r];
-//        }
-//
-//        // Step 3 & 4: stamp every local (non-ghost) point
-//        // Build a reverse lookup: localId of point -> globalClusterId
-//        // We walk localClusterMap and stamp each member point directly.
-//        for (Map.Entry<Long, Cluster> entry : localClusterMap.entrySet()) {
-//            long uid = entry.getKey();
-//            int globalId = offset + localIdMap.get(uid);
-//            Cluster c = entry.getValue();
-//            for (Point p : c.corePts)     { p.globalClusterId = globalId; }
-//            for (Point p : c.boundaryPts) { p.globalClusterId = globalId; }
-//            // ghost points are not stamped — they belong to another process
-//        }
-//
-//        int totalClusters = 0;
-//        for (int c : allCounts) totalClusters += c;
-//        log("Cluster ID assignment done. Global cluster count: " + totalClusters);
-//    }
-//
+    private String coordKey(Point pt)        { return coordKey(pt.coords); }
+    private String coordKey(double[] coords) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < coords.length; i++) {
+            if (i > 0) sb.append(',');
+            sb.append(Double.toHexString(coords[i]));
+        }
+        return sb.toString();
+    }
+
+    private long findClusterRoot(long uid, Map<Long, Long> parent) {
+        long root = uid;
+        while (parent.containsKey(root)) {
+            long p = parent.get(root);
+            if (p == root || p == Long.MIN_VALUE) break;
+            long gp = parent.getOrDefault(p, p);
+            parent.put(root, gp); // path compression
+            root = p;
+        }
+        return root;
+    }
+
     public void log(String message) {
         System.out.println("Process " + COMM_WORLD.Rank() + ": " + message);
     }

@@ -6,3 +6,5 @@ target/
 /timing.csv
 /points.csv
 /bounding.csv
+/src/main/resources/datasets/densired_2.csv
+/src/main/resources/datasets/densired_3.csv

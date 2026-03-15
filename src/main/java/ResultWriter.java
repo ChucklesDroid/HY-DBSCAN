@@ -21,7 +21,7 @@ public class ResultWriter {
     // Timing CSV
     // -----------------------------------------------------------------------
 
-    private static final String TIMING_FILE = "timing.csv";
+    private static final String TIMING_FILE = "results/timing.csv";
 
     private static final String TIMING_HEADER =
             "timestamp,dataset,numProcesses,epsilon,minPts," +
@@ -89,7 +89,7 @@ public class ResultWriter {
     // Points CSV
     // -----------------------------------------------------------------------
 
-    private static final String POINTS_FILE = "points.csv";
+    private static final String POINTS_FILE = "results/points_" + Main.DATASET + "_eps_" + Main.epsilon + "_minPts_" + Main.minpts + ".csv";
 
     /**
      * Writes all points with their cluster IDs to points.csv, overwriting any
@@ -134,7 +134,7 @@ public class ResultWriter {
         }
     }
 
-    private static final String BOUNDING_BOX_FILE = "bounding.csv";
+    private static final String BOUNDING_BOX_FILE = "results/bounding_" + Main.DATASET + "_eps_" + Main.epsilon + "_minPts_" + Main.minpts + ".csv";
 
     public static int writeBoundingBoxes(BoundingBox masterBoundingBox, Set<BoundingBox> boundingBoxes) {
         boundingBoxes.add(masterBoundingBox);
