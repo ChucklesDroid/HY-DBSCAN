@@ -12,4 +12,5 @@ This repo, HY-DBSCAN also known as "HY(Hybrid) Density Based Clustering of Appli
 ### BUILDING THE PROJECT
 
 - build the project using:- `mvn clean package`
-- run the project by using:- `./run.sh`
+- run the project by using:- `./run.sh` if you are using zsh, `./bashrun.sh` if you are using bash
+- The third to last argument is the epsilon value, second to last minPts and last the input file
